@@ -1,0 +1,6 @@
+export { Table } from "./core/Table"
+export { defineTable } from "./core/defineTable"
+export { SQLiteAdapter } from "./adapter/SQLite"
+export { MongoDBAdapter } from "./adapter/MongoDB"
+export { defineGlobalDBAdapter } from "./core/defineTable"
+export { TableJSON } from "fzz/src/objects/funcs/TableJSON"
