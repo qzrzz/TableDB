@@ -1,4 +1,4 @@
-import { defineTable, SQLiteAdapter } from "fzz/src/only/tableDB"
+import { defineTable, SQLiteAdapter } from "tbdb"
 import { rollString } from "fzz"
 const __dirname = import.meta.dirname
 export const useUserTable = defineTable({

@@ -1,5 +1,5 @@
 
-import { get, set, unset, has, cloneDeep, isEqual } from "lodash-es"
+import { get, set, unset, has, cloneDeep, isEqual } from "es-toolkit/compat"
 import { ITableUpdateOp, ITableValue } from "../../../core/types"
 
 /**

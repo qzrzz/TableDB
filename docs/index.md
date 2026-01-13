@@ -1,3 +1,5 @@
+<img src="./logo/tbdb-logo.png" alt="TableDB Logo" height="111"/>
+
 # TableDB
 
 一个非常简单的 NoSQL 数据库抽象层，提供类似 MongoDB 的增删改查 API，支持多种存储后端（SQLite, MongoDB）。

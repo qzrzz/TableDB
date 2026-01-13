@@ -1,5 +1,5 @@
 
-import { get, isEqual as lodashIsEqual, isPlainObject } from "lodash-es"
+import { get, isEqual as lodashIsEqual, isPlainObject } from "es-toolkit/compat"
 import { ITableFilter } from "../../../core/types"
 
 /**

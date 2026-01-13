@@ -15,7 +15,10 @@
     "scripts": {
         "build": "rslib build",
         "dev": "rslib build --watch",
-        "test": "vitest"
+        "test": "vitest",
+        "docs:dev": "vitepress dev docs",
+        "docs:build": "vitepress build docs",
+        "docs:preview": "vitepress preview docs"
     },
     "devDependencies": {
         "@rslib/core": "^0.19.1",
@@ -23,14 +26,16 @@
         "@types/fs-extra": "11.0.4",
         "@types/node": "^22",
         "fs-extra": "11.3.3",
-        "typescript": "^5.9.3"
+        "typescript": "^5.9.3",
+        "vitepress": "2.0.0-alpha.15"
     },
     "dependencies": {
+        "better-sqlite3": "12.6.0",
+        "es-toolkit": "1.43.0",
+        "fzz": "*",
         "mongodb": "7.0.0",
         "vitest": "4.0.16",
-        "zstd-napi": "0.0.12",
-        "better-sqlite3": "12.6.0",
-        "fzz": "*"
+        "zstd-napi": "0.0.12"
     },
     "trustedDependencies": [
         "zstd-napi",

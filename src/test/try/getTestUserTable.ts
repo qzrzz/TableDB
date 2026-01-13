@@ -1,4 +1,4 @@
-import { defineTable, SQLiteAdapter } from "fzz/src/only/tableDB"
+import { defineTable, SQLiteAdapter } from "tbdb"
 import { dto } from "fzz"
 const { String, Number, Boolean, Array, Date, Any, optional, or } = dto
 

@@ -8,8 +8,12 @@
 node_modules
 dist/
 storybook-static
+cache
 
 # IDE
 .vscode/*
 !.vscode/extensions.json
 .idea
+
+
+
