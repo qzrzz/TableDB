@@ -98,7 +98,7 @@ describe("SQLite Adapter API", () => {
             const all = await adapter.findMany({})
             expect(all.length).toBe(3)
 
-            const filtered = await adapter.findMany({ tags: "a" })
+            const filtered = await adapter.findMany({ tags: { $all: ["a"] } })
             expect(filtered.length).toBe(2) // m1, m3
 
             const sorted = await adapter.findMany({}, { sort: { val: -1 } })
@@ -196,4 +196,6 @@ describe("SQLite Adapter API", () => {
             await expect(adapter.set("user2", { id: "user2", email: "a@b.com", age: 25 })).resolves.toBeUndefined()
         })
     })
+
+
 })

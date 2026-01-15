@@ -1,7 +1,7 @@
 import { Table } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"]
+const DATABASE_TYPES: TestDatabaseType[] = ["mongodb", "sqlite"]
 
 describe.each(DATABASE_TYPES)("Table filter - %s", async (dbType) => {
     let table!: Table
@@ -303,6 +303,35 @@ describe.each(DATABASE_TYPES)("Table filter - %s", async (dbType) => {
         ]
 
         await table.insertMany(docs)
+
+        // 隐式匹配
+        let re1 = await table.findMany({ tags: "red" })
+        expect(re1).toEqual([docs[0]])
+
+        let re2 = await table.findMany({ tags: "blue" })
+        expect(re2.length).toBe(2)
+        expect(re2).toEqual(expect.arrayContaining([docs[0], docs[1]]))
+
+        let re3 = await table.findMany({ tags: "green" })
+        expect(re3).toEqual([docs[1]])
+
+        let re4 = await table.findMany({ tags: "yellow" })
+        expect(re4).toEqual([])
+    })
+
+
+    test('隐式数组匹配 (索引)', async () => {
+        let docs = [
+            { id: "d1", tags: ["red", "blue"], type: "colors" },
+            { id: "d2", tags: ["blue", "green", "c3", "c4", "c5"], type: "colors" },
+            { id: "d3", tags: [], type: "colors" },
+        ]
+
+        await table.insertMany(docs)
+
+        await table.defineIndexes([
+            { key: "tags" },
+        ])
 
         // 隐式匹配
         let re1 = await table.findMany({ tags: "red" })

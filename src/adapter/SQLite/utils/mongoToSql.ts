@@ -58,7 +58,11 @@ export async function mongoToSql(filter: ITableFilter, options?: ITableFindOptio
 
     // 1. Filter
     if (filter) {
-        await parseFilterNode(filter, conditions, params)
+        // @ts-ignore
+        const indexedFields = options?.indexedFields as Set<string> | undefined
+        // @ts-ignore
+        const tableName = options?.tableName as string | undefined
+        await parseFilterNode(filter, conditions, params, indexedFields, tableName)
     }
 
     if (conditions.length === 0) conditions.push("1=1")
@@ -101,7 +105,13 @@ export async function mongoToSql(filter: ITableFilter, options?: ITableFindOptio
     }
 }
 
-async function parseFilterNode(node: ITableFilter, conditions: string[], params: any[]) {
+async function parseFilterNode(
+    node: ITableFilter,
+    conditions: string[],
+    params: any[],
+    indexedFields?: Set<string>,
+    tableName?: string
+) {
     for (const key in node) {
         if (key === "$and") {
             const subs = (node as any).$and
@@ -109,7 +119,7 @@ async function parseFilterNode(node: ITableFilter, conditions: string[], params:
                 const group: string[] = []
                 for (const sub of subs) {
                     const subConds: string[] = []
-                    await parseFilterNode(sub, subConds, params)
+                    await parseFilterNode(sub, subConds, params, indexedFields, tableName)
                     if (subConds.length > 0) group.push(`(${subConds.join(" AND ")})`)
                 }
                 if (group.length > 0) conditions.push(`(${group.join(" AND ")})`)
@@ -120,10 +130,11 @@ async function parseFilterNode(node: ITableFilter, conditions: string[], params:
                 const group: string[] = []
                 for (const sub of subs) {
                     const subConds: string[] = []
-                    await parseFilterNode(sub, subConds, params)
+                    await parseFilterNode(sub, subConds, params, indexedFields, tableName)
                     if (subConds.length > 0) group.push(`(${subConds.join(" AND ")})`)
                 }
                 if (group.length > 0) conditions.push(`(${group.join(" OR ")})`)
+                else conditions.push("1=0")
             }
         } else if (key === "$nor") {
             // Ignore (Handled by JsMatch)
@@ -131,12 +142,19 @@ async function parseFilterNode(node: ITableFilter, conditions: string[], params:
             // Ignore (Handled by JsMatch)
         } else {
             const value = (node as any)[key]
-            await parseFieldCondition(key, value, conditions, params)
+            await parseFieldCondition(key, value, conditions, params, indexedFields, tableName)
         }
     }
 }
 
-async function parseFieldCondition(path: string, value: any, conditions: string[], params: any[]) {
+async function parseFieldCondition(
+    path: string,
+    value: any,
+    conditions: string[],
+    params: any[],
+    indexedFields?: Set<string>,
+    tableName?: string
+) {
     let colExpr = ""
     if (path === "id") {
         colExpr = "id"
@@ -154,7 +172,7 @@ async function parseFieldCondition(path: string, value: any, conditions: string[
             // MongoDB 行为：{ field: null } 同时匹配 null 和缺失字段
             conditions.push(`(${colExpr} IS NULL OR ${colExpr} = json('null'))`)
         } else if (isSafeForEquality(value)) {
-            await addCondition(colExpr, "=", value, conditions, params)
+            await addCondition(colExpr, "=", value, conditions, params, indexedFields, tableName)
         }
     } else {
         for (const op in value) {
@@ -166,7 +184,7 @@ async function parseFieldCondition(path: string, value: any, conditions: string[
                         // 使用 IS NULL 来匹配 null 值和缺失字段
                         conditions.push(`(${colExpr} IS NULL OR ${colExpr} = json('null'))`)
                     } else if (isSafeForEquality(opVal)) {
-                        await addCondition(colExpr, "=", opVal, conditions, params)
+                        await addCondition(colExpr, "=", opVal, conditions, params, indexedFields, tableName)
                     }
                     break
                 case "$ne":
@@ -175,24 +193,24 @@ async function parseFieldCondition(path: string, value: any, conditions: string[
                         // 需要字段存在且不为 null
                         conditions.push(`(${colExpr} IS NOT NULL AND ${colExpr} != json('null'))`)
                     } else if (isSafeForEquality(opVal)) {
-                        await addCondition(colExpr, "!=", opVal, conditions, params)
+                        await addCondition(colExpr, "!=", opVal, conditions, params, indexedFields, tableName)
                     }
                     break
                 case "$gt":
                     if (isSafeForRange(opVal))
-                        await addCondition(colExpr, ">", opVal, conditions, params)
+                        await addCondition(colExpr, ">", opVal, conditions, params, indexedFields, tableName)
                     break
                 case "$gte":
                     if (isSafeForRange(opVal))
-                        await addCondition(colExpr, ">=", opVal, conditions, params)
+                        await addCondition(colExpr, ">=", opVal, conditions, params, indexedFields, tableName)
                     break
                 case "$lt":
                     if (isSafeForRange(opVal))
-                        await addCondition(colExpr, "<", opVal, conditions, params)
+                        await addCondition(colExpr, "<", opVal, conditions, params, indexedFields, tableName)
                     break
                 case "$lte":
                     if (isSafeForRange(opVal))
-                        await addCondition(colExpr, "<=", opVal, conditions, params)
+                        await addCondition(colExpr, "<=", opVal, conditions, params, indexedFields, tableName)
                     break
                 case "$in":
                     if (Array.isArray(opVal) && opVal.length > 0) {
@@ -233,14 +251,22 @@ async function parseFieldCondition(path: string, value: any, conditions: string[
     }
 }
 
-async function addCondition(col: string, op: string, val: any, conditions: string[], params: any[]) {
+async function addCondition(
+    col: string,
+    op: string,
+    val: any,
+    conditions: string[],
+    params: any[],
+    indexedFields?: Set<string>,
+    tableName?: string
+) {
     // If column is 'id', force validation as string (SQLite comparison strictness)
     // prepareValue handles serialization, but we want to ensure input is String if it's a direct ID comparison
     // Only if val is primitive number.
     if (col === "id" && typeof val === "number") {
         val = String(val)
     }
-    
+
     // _id 是整数主键，确保值为整数类型
     if (col === "_id") {
         val = ensureIntegerId(val)
@@ -258,10 +284,30 @@ async function addCondition(col: string, op: string, val: any, conditions: strin
             const match = col.match(/^json_extract\(data, '(\$\..+)'\)$/)
             if (match) {
                 const path = match[1]
-                subQuery = `((${col} = ?) OR (json_type(data, '${path}') = 'array' AND EXISTS (SELECT 1 FROM json_each(data, '${path}') WHERE value = ?)))`
-                conditions.push(subQuery)
-                params.push(sVal)
-                params.push(sVal)
+                const typeCheck = typeof val === 'boolean'
+                    ? `json_type(data, '${path}') = '${val ? 'true' : 'false'}'`
+                    : typeof val === 'number'
+                        ? `json_type(data, '${path}') IN ('integer', 'real')`
+                        : "1=1"
+
+                // 智能优化：Inverted Index (Side Table)
+                const fieldName = path.replace(/^\$\./, "")
+                const isIndexed = indexedFields?.has(fieldName) && tableName
+
+                if (isIndexed) {
+                    const safeField = fieldName.replace(/[^a-zA-Z0-9_]/g, "_")
+                    const sideTableName = `_idx_${tableName}_${safeField}`
+
+                    // EXISTS (SELECT 1 FROM "_idx_table_tags" WHERE id = "table".id AND val = ?)
+                    subQuery = `EXISTS (SELECT 1 FROM "${sideTableName}" WHERE id = "${tableName}".id AND val = ?)`
+                    conditions.push(subQuery)
+                    params.push(sVal)
+                } else {
+                    subQuery = `((${col} = ? AND ${typeCheck}) OR (json_type(data, '${path}') = 'array' AND EXISTS (SELECT 1 FROM json_each(data, '${path}') WHERE value = ?)))`
+                    conditions.push(subQuery)
+                    params.push(sVal)
+                    params.push(sVal)
+                }
                 return
             }
         }

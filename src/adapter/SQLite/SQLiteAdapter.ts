@@ -120,22 +120,58 @@ function registerCustomFunctions(db: Database.Database) {
 
 export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     name = "SQLiteAdapter"
+    private statementCache = new Map<string, Database.Statement>()
+    private indexedFields = new Set<string>()
+
     constructor(
         private db: Database.Database,
         private tableName: string,
         private config: { filename: string; safe?: boolean | "full"; zstd?: boolean }
     ) {
-        this.db
-            .prepare(
-                `
+        this.getStatement(`
             CREATE TABLE IF NOT EXISTS "${tableName}" (
                 _id INTEGER PRIMARY KEY AUTOINCREMENT,
                 id TEXT UNIQUE,
                 data TEXT
             )
-        `
+        `).run()
+
+        // 初始化时读取已存在的索引
+        this.loadExistingIndexes()
+    }
+
+    private loadExistingIndexes() {
+        const idxs = this.db
+            .prepare(
+                `SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%'`
             )
-            .run()
+            .all(this.tableName) as { name: string; sql: string }[]
+
+        for (const idx of idxs) {
+            // 解析 SQL 来获取索引字段
+            // CREATE INDEX "idx_age" ON "test" (json_extract(data, '$.age'))
+            const match = idx.sql?.match(/json_extract\(data, '\$\.([^']+)'\)/)
+            if (match && match[1]) {
+                const field = match[1]
+                // 检查对应的 Side Table 是否存在
+                const sideTableName = this.getSideTableName(field)
+                const exists = this.db
+                    .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`)
+                    .get(sideTableName)
+
+                if (exists) {
+                    this.indexedFields.add(field)
+                }
+            }
+        }
+    }
+
+    private getStatement(sql: string): Database.Statement {
+        const cached = this.statementCache.get(sql)
+        if (cached) return cached
+        const stmt = this.db.prepare(sql)
+        this.statementCache.set(sql, stmt)
+        return stmt
     }
 
     /**
@@ -182,7 +218,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async get(id: any): Promise<ITableDoc | void> {
-        const row = this.db.prepare(`SELECT data FROM "${this.tableName}" WHERE id = ?`).get(String(id)) as
+        const row = this.getStatement(`SELECT data FROM "${this.tableName}" WHERE id = ?`).get(String(id)) as
             | { data: string }
             | undefined
         if (!row) return undefined
@@ -193,42 +229,50 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         // Use Async serialize (supports Blobs)
         const normalizedValue = this.normalizeUndefined(value)
         const sVal = await serialize(normalizedValue)
-        this.db
-            .prepare(
-                `
+        this.getStatement(
+            `
             INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)
             ON CONFLICT(id) DO UPDATE SET data=excluded.data
         `
-            )
+        )
             .run(String(id), JSON.stringify(sVal))
     }
 
     async delete(id: any): Promise<void> {
-        this.db.prepare(`DELETE FROM "${this.tableName}" WHERE id = ?`).run(String(id))
+        this.getStatement(`DELETE FROM "${this.tableName}" WHERE id = ?`).run(String(id))
     }
 
     async has(id: any): Promise<boolean> {
-        const row = this.db.prepare(`SELECT 1 FROM "${this.tableName}" WHERE id = ?`).get(String(id))
+        const row = this.getStatement(`SELECT 1 FROM "${this.tableName}" WHERE id = ?`).get(String(id))
         return !!row
     }
 
     async count(filter?: ITableFilter): Promise<number> {
         if (!filter || Object.keys(filter).length === 0) {
-            const res = this.db.prepare(`SELECT count(*) as count FROM "${this.tableName}"`).get() as { count: number }
+            const res = this.getStatement(`SELECT count(*) as count FROM "${this.tableName}"`).get() as { count: number }
             return res.count
         }
 
-        const q = await mongoToSql(filter)
-        const sql = `SELECT count(*) as count FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+        const q = await mongoToSql(filter, { indexedFields: this.indexedFields, tableName: this.tableName } as any)
+        const isCompatible = isQuerySqlCompatible(filter)
 
-        const sFilter = JSON.stringify(await serialize(filter))
+        let sql = ""
+        let params = q.params
 
-        const res = this.db.prepare(sql).get(...q.params, sFilter) as { count: number }
+        if (isCompatible) {
+            sql = `SELECT count(*) as count FROM "${this.tableName}" WHERE (${q.where})`
+        } else {
+            sql = `SELECT count(*) as count FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+            const sFilter = JSON.stringify(await serialize(filter))
+            params = [...params, sFilter]
+        }
+
+        const res = this.getStatement(sql).get(...params) as { count: number }
         return res.count
     }
 
     async clear(): Promise<void> {
-        this.db.prepare(`DELETE FROM "${this.tableName}"`).run()
+        this.getStatement(`DELETE FROM "${this.tableName}"`).run()
     }
 
     async clearAll(): Promise<void> {
@@ -237,10 +281,13 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async drop(): Promise<void> {
-        this.db.prepare(`DROP TABLE IF EXISTS "${this.tableName}"`).run()
+        this.getStatement(`DROP TABLE IF EXISTS "${this.tableName}"`).run()
     }
 
     async close(): Promise<void> {
+        // Clear cache statements if needed? managed by db connection usually.
+        this.statementCache.clear()
+
         if (this.db && this.db.open) {
             const shouldCompress = this.config.zstd && this.config.filename && !this.config.filename.startsWith(":memory:")
 
@@ -256,18 +303,26 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async findMany(filter: ITableFilter, options?: ITableFindOptions): Promise<ITableDoc[]> {
-        const q = await mongoToSql(filter, options)
+        const q = await mongoToSql(filter, { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any)
+        const isCompatible = isQuerySqlCompatible(filter)
+
+        let sql = ""
+        let params = q.params
 
         // Select _id always to optionally return it
-        let sql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+        if (isCompatible) {
+            sql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where})`
+        } else {
+            sql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+            const sFilter = JSON.stringify(await serialize(filter))
+            params = [...params, sFilter]
+        }
 
         if (q.sort) sql += ` ORDER BY ${q.sort}`
         if (q.limit !== undefined) sql += ` LIMIT ${q.limit}`
         if (q.offset !== undefined) sql += ` OFFSET ${q.offset}`
 
-        const sFilter = JSON.stringify(await serialize(filter))
-        // console.log("SQLiteAdapter findMany SQL:", { sFilter })
-        const rows = this.db.prepare(sql).all(...q.params, sFilter)
+        const rows = this.getStatement(sql).all(...params)
 
         // 处理 projection
         const proj = normalizeProjection(options?.projection)
@@ -311,14 +366,24 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         updateOp: ITableUpdateOp<ITableDoc>,
         options?: ITableUpdateOptions
     ): Promise<ITableUpdateResult> {
-        const q = await mongoToSql(filter)
-        const sFilter = JSON.stringify(await serialize(filter))
+        const q = await mongoToSql(filter, { indexedFields: this.indexedFields, tableName: this.tableName } as any)
         const normalizedOp = this.normalizeUndefined(updateOp)
         const sOp = JSON.stringify(await serialize(normalizedOp))
+        const isCompatible = isQuerySqlCompatible(filter)
 
-        const sql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+        let sql = ""
+        let params: any[] = []
 
-        const info = this.db.prepare(sql).run(sOp, ...q.params, sFilter)
+        if (isCompatible) {
+            sql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE (${q.where})`
+            params = [sOp, ...q.params]
+        } else {
+            const sFilter = JSON.stringify(await serialize(filter))
+            sql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+            params = [sOp, ...q.params, sFilter]
+        }
+
+        const info = this.getStatement(sql).run(...params)
 
         let modifiedCount = info.changes
         let matchedCount = info.changes
@@ -380,19 +445,29 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         updateOp: ITableUpdateOp<ITableDoc>,
         options?: ITableUpdateOptions
     ): Promise<ITableUpdateResult> {
-        const q = await mongoToSql(filter, { sort: options?.sort })
+        const q = await mongoToSql(filter, { sort: options?.sort, indexedFields: this.indexedFields, tableName: this.tableName } as any)
         q.limit = 1
 
-        const sFilter = JSON.stringify(await serialize(filter))
+        const isCompatible = isQuerySqlCompatible(filter)
 
-        let selectSql = `SELECT _id, id FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+        let selectSql = ""
+        let params = q.params
+
+        if (isCompatible) {
+            selectSql = `SELECT _id, id FROM "${this.tableName}" WHERE (${q.where})`
+        } else {
+            const sFilter = JSON.stringify(await serialize(filter))
+            selectSql = `SELECT _id, id FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+            params = [...params, sFilter]
+        }
+
         if (q.sort) selectSql += ` ORDER BY ${q.sort}`
         selectSql += ` LIMIT 1`
 
         // Use _id for faster update if available?
         // _id is PK. Row ID.
         // If we select _id, we can update by _id.
-        const row = this.db.prepare(selectSql).get(...q.params, sFilter)
+        const row = this.getStatement(selectSql).get(...params)
 
         if (!row) {
             if (options?.upsert) {
@@ -426,13 +501,13 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const sOp = JSON.stringify(await serialize(normalizedOp))
         // Updating by _id is slightly faster/safer if PK changed (unlikely for _id)
         const updateSql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`
-        this.db.prepare(updateSql).run(sOp, (row as any)._id)
+        this.getStatement(updateSql).run(sOp, (row as any)._id)
 
         return { matchedCount: 1, modifiedCount: 1 }
     }
 
     async insertMany(docs: ITableDoc[]): Promise<ITableInsertResult> {
-        const stmt = this.db.prepare(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
+        const stmt = this.getStatement(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
 
         const result: ITableInsertResult = {
             insertedCount: 0,
@@ -477,9 +552,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         }
 
         const runSetMany = async () => {
-            const stmtCheck = this.db.prepare(`SELECT data FROM "${this.tableName}" WHERE id = ?`)
-            const stmtUpdate = this.db.prepare(`UPDATE "${this.tableName}" SET data = ? WHERE id = ?`)
-            const stmtInsert = this.db.prepare(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
+            const stmtCheck = this.getStatement(`SELECT data FROM "${this.tableName}" WHERE id = ?`)
+            const stmtUpdate = this.getStatement(`UPDATE "${this.tableName}" SET data = ? WHERE id = ?`)
+            const stmtInsert = this.getStatement(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
 
             for (const doc of docs) {
                 const id = String(doc.id)
@@ -528,27 +603,49 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async deleteMany(filter: ITableFilter): Promise<ITableDeletedResult> {
-        const q = await mongoToSql(filter)
-        const sFilter = JSON.stringify(await serialize(filter))
-        const sql = `DELETE FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
-        const info = this.db.prepare(sql).run(...q.params, sFilter)
+        const q = await mongoToSql(filter, { indexedFields: this.indexedFields, tableName: this.tableName } as any)
+        const isCompatible = isQuerySqlCompatible(filter)
+
+        let sql = ""
+        let params = q.params
+
+        if (isCompatible) {
+            sql = `DELETE FROM "${this.tableName}" WHERE (${q.where})`
+        } else {
+            const sFilter = JSON.stringify(await serialize(filter))
+            sql = `DELETE FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+            params = [...params, sFilter]
+        }
+
+        const info = this.getStatement(sql).run(...params)
         return { deletedCount: info.changes }
     }
 
     async deleteOne(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
-        const q = await mongoToSql(filter, { sort: options?.sort })
+        const q = await mongoToSql(filter, { sort: options?.sort, indexedFields: this.indexedFields, tableName: this.tableName } as any)
         q.limit = 1
-        const sFilter = JSON.stringify(await serialize(filter))
+
+        const isCompatible = isQuerySqlCompatible(filter)
+
+        let selectSql = ""
+        let params = q.params
 
         // Query both _id and id to use correct DELETE target
-        let selectSql = `SELECT _id FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+        if (isCompatible) {
+            selectSql = `SELECT _id FROM "${this.tableName}" WHERE (${q.where})`
+        } else {
+            const sFilter = JSON.stringify(await serialize(filter))
+            selectSql = `SELECT _id FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+            params = [...params, sFilter]
+        }
+
         if (q.sort) selectSql += ` ORDER BY ${q.sort}`
         selectSql += ` LIMIT 1`
 
-        const row = this.db.prepare(selectSql).get(...q.params, sFilter)
+        const row = this.getStatement(selectSql).get(...params)
 
         if (row) {
-            this.db.prepare(`DELETE FROM "${this.tableName}" WHERE _id = ?`).run((row as any)._id)
+            this.getStatement(`DELETE FROM "${this.tableName}" WHERE _id = ?`).run((row as any)._id)
             return { deletedCount: 1 }
         }
         return { deletedCount: 0 }
@@ -567,7 +664,12 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             }
 
             if (idx.disabled) {
-                this.db.prepare(`DROP INDEX IF EXISTS "${name}"`).run()
+                this.getStatement(`DROP INDEX IF EXISTS "${name}"`).run()
+                // 更新 indexedFields
+                const keys = typeof idx.key === "string" ? { [idx.key]: 1 } : idx.key
+                for (const k in keys) {
+                    this.indexedFields.delete(k)
+                }
                 continue
             }
 
@@ -576,29 +678,179 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
             for (const [k, dir] of Object.entries(keys)) {
                 exprs.push(`json_extract(data, '$.${k}') ${dir === 1 ? "ASC" : "DESC"}`)
+                this.indexedFields.add(k)
             }
 
             const unique = idx.unique ? "UNIQUE" : ""
             const sql = `CREATE ${unique} INDEX IF NOT EXISTS "${name}" ON "${this.tableName}" (${exprs.join(", ")})`
 
-            this.db.prepare(sql).run()
+            this.getStatement(sql).run()
+
+            // Side Table Optimization (Inverted Index)
+            // Only for single-key indexes to avoid complexity
+            if (Object.keys(keys).length === 1) {
+                const field = Object.keys(keys)[0]
+                this.createSideTableIndex(field)
+            }
         }
+    }
+
+    private getSideTableName(field: string): string {
+        // Sanitize field to be safe in table name
+        const safeField = field.replace(/[^a-zA-Z0-9_]/g, "_")
+        return `_idx_${this.tableName}_${safeField}`
+    }
+
+    private createSideTableIndex(field: string) {
+        const sideTableName = this.getSideTableName(field)
+        const safeField = field.replace(/'/g, "''") // Escape for SQL string literal
+
+        // 1. Create Side Table
+        // PK (val, id) makes it an effective Covering Index for lookup
+        this.getStatement(
+            `CREATE TABLE IF NOT EXISTS "${sideTableName}" (val, id, PRIMARY KEY(val, id)) WITHOUT ROWID`
+        ).run()
+
+        // 2. Triggers
+        // INSERT
+        this.getStatement(
+            `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_insert" AFTER INSERT ON "${this.tableName}"
+            BEGIN
+                INSERT INTO "${sideTableName}" (val, id)
+                SELECT DISTINCT value, NEW.id FROM json_each(NEW.data, '$.${safeField}')
+                WHERE json_type(NEW.data, '$.${safeField}') = 'array' OR json_type(NEW.data, '$.${safeField}') != 'object'; -- Handle Arrays and Scalars (ignoring objects)
+            END;`
+        ).run()
+
+        // DELETE
+        this.getStatement(
+            `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_delete" AFTER DELETE ON "${this.tableName}"
+            BEGIN
+                DELETE FROM "${sideTableName}" WHERE id = OLD.id;
+            END;`
+        ).run()
+
+        // UPDATE
+        this.getStatement(
+            `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_update" AFTER UPDATE ON "${this.tableName}"
+            BEGIN
+                DELETE FROM "${sideTableName}" WHERE id = OLD.id;
+                INSERT INTO "${sideTableName}" (val, id)
+                SELECT DISTINCT value, NEW.id FROM json_each(NEW.data, '$.${safeField}')
+                WHERE json_type(NEW.data, '$.${safeField}') = 'array' OR json_type(NEW.data, '$.${safeField}') != 'object';
+            END;`
+        ).run()
+
+        // 3. Backfill Data (Idempotent: INSERT OR IGNORE)
+        // We only backfill if empty? or always? INSERT OR IGNORE is safe.
+        this.getStatement(
+            `INSERT OR IGNORE INTO "${sideTableName}" (val, id)
+            SELECT DISTINCT json_each.value, "${this.tableName}".id 
+            FROM "${this.tableName}", json_each("${this.tableName}".data, '$.${safeField}')
+            WHERE json_type("${this.tableName}".data, '$.${safeField}') = 'array' OR json_type("${this.tableName}".data, '$.${safeField}') != 'object'`
+        ).run()
+    }
+
+    private dropSideTableIndex(field: string) {
+        const sideTableName = this.getSideTableName(field)
+        // Dropping table automatically drops triggers associated with it? 
+        // No, triggers are on Main Table. Must drop explicitly.
+
+        this.getStatement(`DROP TRIGGER IF EXISTS "t_${sideTableName}_insert"`).run()
+        this.getStatement(`DROP TRIGGER IF EXISTS "t_${sideTableName}_delete"`).run()
+        this.getStatement(`DROP TRIGGER IF EXISTS "t_${sideTableName}_update"`).run()
+        this.getStatement(`DROP TABLE IF EXISTS "${sideTableName}"`).run()
     }
 
     async dropIndexes(): Promise<void> {
-        const idxs = this.db
-            .prepare(
-                `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%'`
-            )
-            .all(this.tableName) as { name: string }[]
-        for (const idx of idxs) {
-            this.db.prepare(`DROP INDEX "${idx.name}"`).run()
-        }
+        const dropTx = this.db.transaction(() => {
+            const idxs = this.db
+                .prepare(
+                    `SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%'`
+                )
+                .all(this.tableName) as { name: string; sql: string }[]
+
+            for (const idx of idxs) {
+                this.getStatement(`DROP INDEX "${idx.name}"`).run()
+            }
+
+            // Drop Side Tables
+            for (const field of this.indexedFields) {
+                this.dropSideTableIndex(field)
+            }
+            this.indexedFields.clear()
+        })
+        dropTx()
     }
 
     async compact(): Promise<void> {
-        this.db.prepare("VACUUM").run()
+        this.getStatement("VACUUM").run()
     }
+}
+
+function isQuerySqlCompatible(filter: ITableFilter): boolean {
+    if (!filter) return true
+
+    for (const key in filter) {
+        if (key === "$and" || key === "$or") {
+            const subs = (filter as any)[key]
+            if (Array.isArray(subs)) {
+                for (const sub of subs) {
+                    if (!isQuerySqlCompatible(sub)) return false
+                }
+            }
+            continue
+        }
+
+        // Unsupported logic
+        if (key === "$nor" || key === "$not" || key === "$where") return false
+
+        const val = (filter as any)[key]
+        if (val && typeof val === "object") {
+            // Check if it's an operator object
+            if (!Array.isArray(val)) {
+                for (const op in val) {
+                    // Check supported operators
+                    if (["$eq", "$gt", "$gte", "$lt", "$lte", "$in"].includes(op)) {
+                        // Check operand compatibility
+                        const opVal = val[op]
+                        if (!isCompatibleValue(opVal)) return false
+                    } else {
+                        // Unsupported operator (e.g. $regex, $elemMatch, $size, $exists etc.)
+                        // Wait, mongoToSql doesn't handle $exists? Yes it doesn't.
+                        return false
+                    }
+                }
+            } else {
+                // Array value as direct equality check [1, 2] -> unsafe for SQL if we treated it as equality
+                // But mongoToSql treats it as equality? 
+                // isSafeForEquality in mongoToSql treats Array as TRUE.
+                // But we want to be conservative.
+                // If it is an array and not an operator, it probably implies strict array equality, 
+                // which mongoToSql handles via parameters.
+                // However, array equality in JSON extract logic is tricky. 
+                // Let's assume complex types like Array/Object are NOT fully trusted for SQL-only optimization to be safe.
+                return false
+            }
+        } else {
+            // Primitive value check
+            if (!isCompatibleValue(val)) return false
+        }
+    }
+    return true
+}
+
+function isCompatibleValue(val: any): boolean {
+    if (val === null || val === undefined) return true
+    const t = typeof val
+    if (t === 'number' || t === 'string' || t === 'boolean') return true
+    if (t === 'bigint') return false // serializes to object, unsafe for SQL range comparison
+
+    // Date, Buffer, etc might rely on specific serialization that matches?
+    // Dates are stored as ISO strings. SQL comparison of ISO strings works for > < etc.
+    if (val instanceof Date) return true
+
+    return false
 }
 
 /**
