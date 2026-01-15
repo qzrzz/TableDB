@@ -173,6 +173,9 @@ async function parseFieldCondition(
             conditions.push(`(${colExpr} IS NULL OR ${colExpr} = json('null'))`)
         } else if (isSafeForEquality(value)) {
             await addCondition(colExpr, "=", value, conditions, params, indexedFields, tableName)
+        } else {
+            // SQL 比较的不安全类型
+            conditions.push("1=0")
         }
     } else {
         for (const op in value) {
@@ -214,19 +217,39 @@ async function parseFieldCondition(
                     break
                 case "$in":
                     if (Array.isArray(opVal) && opVal.length > 0) {
-                        // All elements must be safe for equality to use SQL IN
+                        // 必须所有元素都支持安全相等性检查才能使用 SQL IN
                         if (opVal.every(isSafeForEquality)) {
                             const marks = opVal.map(() => "?").join(",")
-                            conditions.push(`${colExpr} IN (${marks})`)
+
+                            // 智能优化：倒排索引 (Side Table) 检查
+                            let optimized = false
+                            if (tableName && indexedFields) {
+                                const match = colExpr.match(/^json_extract\(data, '(\$\..+)'\)$/)
+                                if (match) {
+                                    const path = match[1]
+                                    const fieldName = path.replace(/^\$\./, "")
+                                    if (indexedFields.has(fieldName)) {
+                                        const safeField = fieldName.replace(/[^a-zA-Z0-9_]/g, "_")
+                                        const sideTableName = `_idx_${tableName}_${safeField}`
+                                        conditions.push(`EXISTS (SELECT 1 FROM "${sideTableName}" WHERE id = "${tableName}".id AND val IN (${marks}))`)
+                                        optimized = true
+                                    }
+                                }
+                            }
+
+                            if (!optimized) {
+                                conditions.push(`${colExpr} IN (${marks})`)
+                            }
+
                             for (let v of opVal) {
                                 if (colExpr === "id" && typeof v === "number") v = String(v)
                                 const [sVal] = await prepareValue(v)
                                 params.push(sVal)
                             }
                         } else {
-                            // If unsafe, we can't use SQL IN efficiently or correctly?
-                            // Equality for BigInt/Buffer is safe, so this mostly skipping Objects
-                            // If skipped, JsMatch handles it.
+                            // 如果不安全，则无法高效或正确地使用 SQL IN
+                            // BigInt/Buffer 的相等性是安全的，所以这里主要跳过对象
+                            // 如果跳过，由 JsMatch 处理。
                         }
                     } else {
                         conditions.push("1=0")
@@ -260,9 +283,9 @@ async function addCondition(
     indexedFields?: Set<string>,
     tableName?: string
 ) {
-    // If column is 'id', force validation as string (SQLite comparison strictness)
-    // prepareValue handles serialization, but we want to ensure input is String if it's a direct ID comparison
-    // Only if val is primitive number.
+    // 如果列是 'id'，强制作为字符串验证 (SQLite 比较的严格性)
+    // prepareValue 处理序列化，但如果是直接 ID 比较，我们要确保输入是字符串
+    // 仅当 val 是原始数字时。
     if (col === "id" && typeof val === "number") {
         val = String(val)
     }
@@ -303,17 +326,26 @@ async function addCondition(
                     conditions.push(subQuery)
                     params.push(sVal)
                 } else {
-                    subQuery = `((${col} = ? AND ${typeCheck}) OR (json_type(data, '${path}') = 'array' AND EXISTS (SELECT 1 FROM json_each(data, '${path}') WHERE value = ?)))`
+                    // 强制对序列化为对象 (Map, Set) 的复杂类型进行 JSON 比较
+                    // 以避免简单字符串比较中的空格/格式不匹配
+                    if (val instanceof Map || val instanceof Set) {
+                        subQuery = `((${col} = json(?) AND ${typeCheck}))`
+                    } else {
+                        subQuery = `((${col} = ? AND ${typeCheck}) OR (json_type(data, '${path}') = 'array' AND EXISTS (SELECT 1 FROM json_each(data, '${path}') WHERE value = ?)))`
+                    }
                     conditions.push(subQuery)
                     params.push(sVal)
-                    params.push(sVal)
+                    // 仅为数组检查分支再次 push sVal
+                    if (!(val instanceof Map) && !(val instanceof Set)) {
+                        params.push(sVal)
+                    }
                 }
                 return
             }
         }
     }
 
-    // For "Not Equal" logic ($ne), matches if different OR missing/null.
+    // 对于 "不等于" 逻辑 ($ne)，如果不同或缺失/null 则匹配。
     if (op === "!=") {
         conditions.push(`(${col} != ? OR ${col} IS NULL)`)
         params.push(sVal)
@@ -339,17 +371,20 @@ function isSafeForEquality(val: any): boolean {
     if (t === 'bigint') return true
     if (val instanceof Date) return true
 
-    // Arrays have stable serialization order [1,2] -> "[1,2]"
+    // 数组具有稳定的序列化顺序 [1,2] -> "[1,2]"
     if (Array.isArray(val)) return true
 
-    // Buffers have stable wrapped structure
+    // Buffer 具有稳定的包装结构
     if ((typeof Buffer !== 'undefined' && Buffer.isBuffer(val)) ||
         val instanceof ArrayBuffer ||
         (ArrayBuffer.isView(val) && !(val instanceof DataView))) {
         return true
     }
 
-    // Plain objects are unsafe due to key ordering
+    // 普通对象因键顺序而不安全
+    // 但 Map 和 Set 具有稳定的序列化 (如果检查相同插入顺序的精确匹配)
+    if (val instanceof Map || val instanceof Set) return true
+
     if (t === 'object') return false
 
     return false

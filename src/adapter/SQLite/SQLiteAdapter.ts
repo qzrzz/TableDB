@@ -701,24 +701,53 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return `_idx_${this.tableName}_${safeField}`
     }
 
-    private createSideTableIndex(field: string) {
+    private async createSideTableIndex(field: string) {
+        // 1. 创建 Side Table
+        // _idx_{tableName}_{field}
+        // key: value, id
+        // 使用标准表允许在 (val, id) 中存储 NULL（WITHOUT ROWID 不允许主键为 NULL）
+        const safeField = field.replace(/"/g, '""')
         const sideTableName = this.getSideTableName(field)
-        const safeField = field.replace(/'/g, "''") // Escape for SQL string literal
 
-        // 1. Create Side Table
-        // PK (val, id) makes it an effective Covering Index for lookup
         this.getStatement(
-            `CREATE TABLE IF NOT EXISTS "${sideTableName}" (val, id, PRIMARY KEY(val, id)) WITHOUT ROWID`
+            `CREATE TABLE IF NOT EXISTS "${sideTableName}" (
+                val,
+                id,
+                PRIMARY KEY (val, id)
+            )`
         ).run()
 
-        // 2. Triggers
+        // 2. 创建触发器 (自动同步)
+
+        // 辅助 SQL 片段
+        const extractArr = `SELECT DISTINCT value, NEW.id FROM json_each(NEW.data, '$.${safeField}') WHERE json_type(NEW.data, '$.${safeField}') = 'array'`
+        const extractScalar = `SELECT json_extract(NEW.data, '$.${safeField}'), NEW.id WHERE json_type(NEW.data, '$.${safeField}') IS NOT 'array' AND json_type(NEW.data, '$.${safeField}') IS NOT 'object' AND json_extract(NEW.data, '$.${safeField}') IS NOT NULL`
+        // 注意：我们排除了 Object。是否也应该排除 NULL？
+        // 等等，失败的测试插入了 NULL。Mongo 会索引 NULL。所以我们应该索引 NULL？
+        // 但是如果 key 缺失 json_extract 返回 NULL？
+        //  - 如果 key 缺失: json_type 为 null。json_extract 为 null。
+        //  - 如果 key 存在且值为 null: json_type 为 'null'。json_extract 为 null。
+        // 我们只想索引 "显式 Null"？
+        // Mongo: {a:1} -> 索引条目? 否。 {a:null} -> 索引条目 'null'。
+        // json_extract(data, '$.field') 对于 "缺失" 和 "null 值" 都返回 NULL。
+        // 使用 json_type 来区分？
+        // json_type(..., '$.field') 如果显式为 null 则返回 'null'。如果缺失则返回 NULL。
+
+        const extractScalarAndNull = `
+            SELECT json_extract(NEW.data, '$.${safeField}'), NEW.id 
+            WHERE json_type(NEW.data, '$.${safeField}') IS NOT 'array' 
+              AND json_type(NEW.data, '$.${safeField}') IS NOT 'object'
+              AND json_type(NEW.data, '$.${safeField}') IS NOT NULL
+        `
+
         // INSERT
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_insert" AFTER INSERT ON "${this.tableName}"
             BEGIN
                 INSERT INTO "${sideTableName}" (val, id)
-                SELECT DISTINCT value, NEW.id FROM json_each(NEW.data, '$.${safeField}')
-                WHERE json_type(NEW.data, '$.${safeField}') = 'array' OR json_type(NEW.data, '$.${safeField}') != 'object'; -- Handle Arrays and Scalars (ignoring objects)
+                ${extractArr}
+                UNION
+                ${extractScalarAndNull};
             END;`
         ).run()
 
@@ -736,19 +765,31 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             BEGIN
                 DELETE FROM "${sideTableName}" WHERE id = OLD.id;
                 INSERT INTO "${sideTableName}" (val, id)
-                SELECT DISTINCT value, NEW.id FROM json_each(NEW.data, '$.${safeField}')
-                WHERE json_type(NEW.data, '$.${safeField}') = 'array' OR json_type(NEW.data, '$.${safeField}') != 'object';
+                ${extractArr}
+                UNION
+                ${extractScalarAndNull};
             END;`
         ).run()
 
-        // 3. Backfill Data (Idempotent: INSERT OR IGNORE)
-        // We only backfill if empty? or always? INSERT OR IGNORE is safe.
+        // 3. 回填数据
+        // 为了简化，直接循环或使用复杂 SQL。
+        // 因为这是一次性操作，我们可以使用类似的 UNION 逻辑。
+        const backfillArr = `SELECT DISTINCT json_each.value, "${this.tableName}".id FROM "${this.tableName}", json_each("${this.tableName}".data, '$.${safeField}') WHERE json_type("${this.tableName}".data, '$.${safeField}') = 'array'`
+        const backfillScalar = `
+            SELECT json_extract(data, '$.${safeField}'), id FROM "${this.tableName}"
+            WHERE json_type(data, '$.${safeField}') IS NOT 'array'
+              AND json_type(data, '$.${safeField}') IS NOT 'object'
+              AND json_type(data, '$.${safeField}') IS NOT NULL
+        `
+
         this.getStatement(
             `INSERT OR IGNORE INTO "${sideTableName}" (val, id)
-            SELECT DISTINCT json_each.value, "${this.tableName}".id 
-            FROM "${this.tableName}", json_each("${this.tableName}".data, '$.${safeField}')
-            WHERE json_type("${this.tableName}".data, '$.${safeField}') = 'array' OR json_type("${this.tableName}".data, '$.${safeField}') != 'object'`
+            ${backfillArr}
+            UNION
+            ${backfillScalar}`
         ).run()
+
+        this.indexedFields.add(field)
     }
 
     private dropSideTableIndex(field: string) {
@@ -859,7 +900,7 @@ function isCompatibleValue(val: any): boolean {
 function project(doc: any, projection: any): any {
     if (!projection || Object.keys(projection).length === 0) return doc
 
-    // Normalize projection (array to object)
+    // 规范化投影 (数组转对象)
     const proj: any = {}
     if (Array.isArray(projection)) {
         for (const key of projection) proj[key] = 1
@@ -869,15 +910,15 @@ function project(doc: any, projection: any): any {
 
     const result: any = {}
     const keys = Object.keys(proj)
-    // Check if it's inclusion or exclusion (mixed not allowed except _id, but we simplify)
-    // If any value is 1/true, it's inclusion (rest suppressed).
-    // If all 0/false, it's exclusion (rest kept).
+    // 检查是包含模式还是排除模式 (不允许混合，除了 _id，但这里简化处理)
+    // 如果任何值为 1/true，则为包含模式 (其余被抑制)。
+    // 如果全为 0/false，则为排除模式 (其余保留)。
 
-    // Simplification: Mongo assumes _id included by default.
-    // If user says { a: 1 }, only a and id included.
-    // If user says { a: 0 }, a excluded, rest included.
+    // 简化：Mongo 默认包含 _id。
+    // 如果用户指定 { a: 1 }，则只包含 a 和 id。
+    // 如果用户指定 { a: 0 }，则排除 a，其余包含。
 
-    // Detect mode
+    // 检测模式
     let isInclusion = false
     for (const k in proj) {
         if (proj[k] === 1 || proj[k] === true) {
@@ -887,9 +928,8 @@ function project(doc: any, projection: any): any {
     }
 
     if (isInclusion) {
-        // Inclusion Mode
-        // Always include ID unless explicitly excluded (Mongo behavior)
-        // Always include ID unless explicitly excluded (Mongo behavior)
+        // 包含模式 (Inclusion Mode)
+        // 除非明确排除，否则始终包含 ID (Mongo 行为)
         if (doc.id !== undefined && (proj.id === 1 || proj.id === true)) {
             result.id = doc.id
         }
@@ -901,12 +941,12 @@ function project(doc: any, projection: any): any {
         for (const key in proj) {
             if (proj[key] === 1 || proj[key] === true) {
                 if (key === "id" || key === "_id") continue
-                // Nested projection not fully supported here, just top level
+                // 此处未完全支持嵌套投影，仅顶层
                 if (doc[key] !== undefined) result[key] = doc[key]
             }
         }
     } else {
-        // Exclusion Mode
+        // 排除模式 (Exclusion Mode)
         Object.assign(result, doc)
         for (const key in proj) {
             if (proj[key] === 0 || proj[key] === false) {
