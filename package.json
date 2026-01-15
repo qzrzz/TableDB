@@ -26,6 +26,7 @@
         "@types/fs-extra": "11.0.4",
         "@types/node": "^22",
         "fs-extra": "11.3.3",
+        "tinybench": "6.0.0",
         "typescript": "^5.9.3",
         "vitepress": "2.0.0-alpha.15"
     },
