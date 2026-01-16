@@ -21,7 +21,7 @@ export interface ITableDBAdapterInstance {
     delete(id: any): Promise<void>
     has(id: any): Promise<boolean>
 
-    count(filter?: ITableFilter): Promise<number>
+    count(filter?: ITableFilter, options?: { debug?: ITableDebugResult }): Promise<number>
     /** 清空所有数据，不包括索引 */
     clear(): Promise<void>
     /** 清除所有数据和索引 */
@@ -82,7 +82,7 @@ export interface ITableDBAdapterInstance {
      *
      * 根据 filter 的匹配结果，可能会删除多个文档
      */
-    deleteMany(filter: ITableFilter): Promise<ITableDeletedResult>
+    deleteMany(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult>
 
     /** 删除单个文档
      *
@@ -159,7 +159,12 @@ export interface ITableFindOptions {
     numericOrdering?: boolean
     /** 是否忽略标记删除逻辑，默认 false */
     ignoreMarkDelete?: boolean
+
+    /** 调试信息存储对象
+     *  提供一个对象用来接受调试信息，调试信息会写入该对象 */
+    debug?: ITableDebugResult
 }
+
 
 export interface ITableUpdateOptions {
     /** 是否在没有匹配的文档时插入一个新文档，然后再进行更新操作 */
@@ -172,6 +177,10 @@ export interface ITableUpdateOptions {
      * 也可以是字段映射对象，1 表示升序，-1 表示降序
      */
     sort?: string[] | Record<string, 1 | -1>
+
+    /** 调试信息存储对象
+     *  提供一个对象用来接受调试信息，调试信息会写入该对象 */
+    debug?: ITableDebugResult
 }
 
 export interface ITableDeleteOptions {
@@ -185,6 +194,10 @@ export interface ITableDeleteOptions {
 
     /** 是否忽略标记删除逻辑，直接物理删除文档，默认 false */
     readDelete?: boolean
+
+    /** 调试信息存储对象
+     *  提供一个对象用来接受调试信息，调试信息会写入该对象 */
+    debug?: ITableDebugResult
 }
 
 export interface ITableSetOptions {
@@ -200,7 +213,63 @@ export interface ITableSetOptions {
     insertOnly?: boolean
     /** 是否只更新已存在的文档，不存在的文档不进行插入 */
     updateOnly?: boolean
+
+    /** 调试信息存储对象
+     *  提供一个对象用来接受调试信息，调试信息会写入该对象 */
+    debug?: ITableDebugResult
 }
+
+
+export interface ITableDebugResult {
+    // --- Execution Info (执行细节) ---
+    /** SQL 语句及其参数，结构化存储，支持多条（如批量操作或回退查询） */
+    sql?: Array<{
+        query: string
+        params: any[]
+        /** 该条 SQL 的实际执行耗时 (ms) */
+        executionTimeMs?: number
+    }>
+    /** EXPLAIN QUERY PLAN 的原始输出 (通常对应最后一条 SQL) */
+    sqlPlan?: Array<{ id: number; parent: number; detail: string }>
+
+    // --- Performance Metrics (性能耗时指标) ---
+    /** 适配器总耗时 (ms, 从调用开始到返回) */
+    totalTimeMs?: number
+    /** SQL 准备耗时 (ms, mongoToSql 解析 + 序列化开销) */
+    prepareTimeMs?: number
+    /** 实际数据库交互总耗时 (ms) */
+    dbExecTimeMs?: number
+
+    // --- Strategy & Compatibility (策略与兼容性) ---
+    /** 查询策略: 'SQL' (纯SQL) | 'HYBRID' (混合) | 'JS' (纯JS兜底) */
+    strategy?: "SQL" | "HYBRID" | "JS"
+
+    /** 是否触发了侧表优化 */
+    isSideTableUsed?: boolean
+    /** 具体的索引使用情况 (如果有) */
+    usedIndexes?: string[]
+
+    // --- Diagnostic Info (诊断信息) ---
+    /** 导致无法使用纯 SQL 的原因列表 (替换 dirtyQueries) */
+    dirtyReasons?: Array<{
+        /** 字段路径 */
+        path: string
+        /** 原因 (e.g., "Array containment", "$where operator") */
+        reason: string
+        /** 导致问题的值 */
+        value?: any
+    }>
+
+    /** 是否全表扫描 (从 sqlPlan 分析得出) */
+    isFullScan?: boolean
+
+    // --- Context (上下文) ---
+    /** 事务状态 */
+    isTransaction?: boolean
+
+    [key: string]: any
+}
+
 
 export interface ITableDefineIndexesOptions {
     /** 是否强制重新创建索引，默认 false */

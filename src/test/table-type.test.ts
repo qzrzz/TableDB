@@ -107,7 +107,7 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         const val = new Map<any, any>([
             ["key1", "value1"],
             ["key2", 123],
-            [{ nested: "key" }, new Set([1, 2])]
+            [{ nested: "key" }, new Set([1, 2])],
         ])
         await table.insertOne({ id, val })
 
@@ -152,7 +152,8 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         const id = "buffer"
         const val = new ArrayBuffer(8)
         const view = new Uint8Array(val)
-        view[0] = 1; view[1] = 255;
+        view[0] = 1
+        view[1] = 255
 
         await table.insertOne({ id, val })
         const doc = await table.get(id)
@@ -183,10 +184,8 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
             set: new Set([1, 2]),
             buf: new Uint8Array([0x00, 0xff]),
             nested: {
-                list: [
-                    new Map([["inner", true]])
-                ]
-            }
+                list: [new Map([["inner", true]])],
+            },
         }
         await table.insertOne({ id, val })
         const doc = await table.get(id)
@@ -217,12 +216,12 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         await table.insertMany([
             { id: 1, val: 10 },
             { id: 2, val: 20 },
-            { id: 3, val: 30 }
+            { id: 3, val: 30 },
         ])
 
         const res = await table.findMany({ val: { $gt: 15 } })
         expect(res.length).toBe(2)
-        expect(res.map(d => d.val).sort()).toEqual([20, 30])
+        expect(res.map((d) => d.val).sort()).toEqual([20, 30])
     })
 
     it("应该支持对混合类型使用 $in 查询", async () => {
@@ -230,7 +229,7 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         await table.insertMany([
             { id: 1, val: "a" },
             { id: 2, val: 10 },
-            { id: 3, val: d }
+            { id: 3, val: d },
         ])
 
         const res = await table.findMany({ val: { $in: ["a", d] } })
@@ -242,15 +241,7 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         const id = "deep_nest"
 
         // Map -> Set -> Array -> Map
-        const deepVal = new Map([
-            ["level1", new Set([
-                "item1",
-                [
-                    "array_item",
-                    new Map([["deep_key", "deep_value"]])
-                ]
-            ])]
-        ])
+        const deepVal = new Map([["level1", new Set(["item1", ["array_item", new Map([["deep_key", "deep_value"]])]])]])
 
         await table.insertOne({ id, val: deepVal })
         const doc = await table.get(id)
@@ -259,7 +250,7 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         const l1 = doc?.val.get("level1")
         expect(l1).toBeInstanceOf(Set)
 
-        const arr = Array.from(l1).find(i => Array.isArray(i)) as any[]
+        const arr = Array.from(l1).find((i) => Array.isArray(i)) as any[]
         expect(arr).toBeDefined()
         expect(arr[0]).toBe("array_item")
 
@@ -297,7 +288,7 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
             float32: new Float32Array([1.5]),
             float64: new Float64Array([1.123456789]),
             bigInt64: new BigInt64Array([9007199254740991n]),
-            bigUint64: new BigUint64Array([18446744073709551615n])
+            bigUint64: new BigUint64Array([18446744073709551615n]),
         }
     }
 
@@ -361,12 +352,12 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         // 实际上 TableDB 对于某些类型可能保留引用或还原为新对象
         // 我们遍历检查 instanceof
         const arr = Array.from(resSet)
-        expect(arr.some(x => x instanceof Date && x.toISOString() === "2024-01-01T00:00:00.000Z")).toBe(true)
-        expect(arr.some(x => x instanceof RegExp && x.source === "test")).toBe(true)
-        expect(arr.some(x => x instanceof Map && x.get("k") === "v")).toBe(true)
-        expect(arr.some(x => x instanceof Set && x.has(1))).toBe(true)
-        expect(arr.some(x => x instanceof Int8Array)).toBe(true)
-        expect(arr.some(x => x instanceof BigUint64Array)).toBe(true)
+        expect(arr.some((x) => x instanceof Date && x.toISOString() === "2024-01-01T00:00:00.000Z")).toBe(true)
+        expect(arr.some((x) => x instanceof RegExp && x.source === "test")).toBe(true)
+        expect(arr.some((x) => x instanceof Map && x.get("k") === "v")).toBe(true)
+        expect(arr.some((x) => x instanceof Set && x.has(1))).toBe(true)
+        expect(arr.some((x) => x instanceof Int8Array)).toBe(true)
+        expect(arr.some((x) => x instanceof BigUint64Array)).toBe(true)
     })
 
     it("Array 应该支持嵌套所有支持的数据格式", async () => {
@@ -393,11 +384,141 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         expect(resArr).toContain(9007199254740991n)
 
         // Complex
-        expect(resArr.some(x => x instanceof Date)).toBe(true)
-        expect(resArr.some(x => x instanceof RegExp)).toBe(true)
-        expect(resArr.some(x => x instanceof Map)).toBe(true)
-        expect(resArr.some(x => x instanceof Set)).toBe(true)
-        expect(resArr.some(x => x instanceof Uint8Array)).toBe(true)
-        expect(resArr.some(x => x instanceof Float64Array)).toBe(true)
+        expect(resArr.some((x) => x instanceof Date)).toBe(true)
+        expect(resArr.some((x) => x instanceof RegExp)).toBe(true)
+        expect(resArr.some((x) => x instanceof Map)).toBe(true)
+        expect(resArr.some((x) => x instanceof Set)).toBe(true)
+        expect(resArr.some((x) => x instanceof Uint8Array)).toBe(true)
+        expect(resArr.some((x) => x instanceof Float64Array)).toBe(true)
+    })
+
+    it("数组全面测试", async () => {
+        // 准备两条文档，覆盖数字、字符串、混合、日期数组
+        const docs = [
+            {
+                id: "d1",
+                arr_numbers: [1, 2, 3, 5, 6],
+                arr_strings: ["a", "b", "c"],
+                arr_mixed: [1, "two", null, new Date("2020-01-01T00:00:00.000Z")],
+                arr_date: [new Date("2021-01-01T00:00:00.000Z"), new Date("2022-02-02T00:00:00.000Z"), new Date("2023-03-03T00:00:00.000Z")],
+            },
+            {
+                id: "d2",
+                arr_numbers: [10, 20, 30],
+                arr_strings: ["x"],
+                arr_mixed: [null, "str", new Date("2020-01-01T00:00:00.000Z")],
+                arr_date: [new Date("2019-01-01T00:00:00.000Z")],
+            },
+        ]
+
+        // 插入
+        await table.insertMany(docs)
+
+        // 读取与类型保留
+        const got = await table.get("d1")
+        expect(got).toBeDefined()
+        expect(Array.isArray(got?.arr_numbers)).toBe(true)
+        expect(got?.arr_numbers).toEqual([1, 2, 3, 5, 6])
+
+        // 精确数组匹配（字符串数组）
+        const exact = await table.findOne({ arr_strings: ["a", "b", "c"] })
+        expect(exact).toBeDefined()
+        expect(exact?.id).toBe("d1")
+
+        // 元素存在查询：数字元素 5 在 d1 中
+        const hasFive = await table.findMany({ arr_numbers: { $in: [5] } })
+        expect(hasFive.some((r) => r.id === "d1")).toBe(true)
+
+        // 日期元素查询：使用 $in 包含 Date 对象
+        const dateToFind = new Date("2022-02-02T00:00:00.000Z")
+        const dateRes = await table.findMany({ arr_date: { $in: [dateToFind] } })
+        expect(dateRes.some((r) => r.id === "d1")).toBe(true)
+
+        // dot-notation 索引查询（第一项等于 1）
+        const idx0 = await table.findOne({ "arr_numbers.0": 1 })
+        expect(idx0).toBeDefined()
+        expect(idx0?.id).toBe("d1")
+
+        // 更新：整体替换数组
+        await table.updateOne({ id: "d1" }, { $set: { arr_numbers: [7, 8] } })
+        const afterSet = await table.get("d1")
+        expect(afterSet?.arr_numbers).toEqual([7, 8])
+
+        // 更新：通过点位替换数组内某个索引（arr_mixed[2] 原为 null，替换为 Date）
+        const newNestedDate = new Date("2021-01-01T00:00:00.000Z")
+        await table.updateOne({ id: "d1" }, { $set: { "arr_mixed.2": newNestedDate } })
+        const afterIdxSet = await table.get("d1")
+        expect(afterIdxSet?.arr_mixed[2]).toBeInstanceOf(Date)
+        expect((afterIdxSet?.arr_mixed[2] as Date).toISOString()).toBe(newNestedDate.toISOString())
+
+        // 验证另一条记录仍然存在且未被改动
+        const other = await table.get("d2")
+        expect(other).toBeDefined()
+        expect(other?.arr_numbers).toEqual([10, 20, 30])
+    })
+
+    it("Date 全面测试", async () => {
+        // 插入多个日期文档以及一个 null
+        const d1 = new Date("2020-01-01T00:00:00.000Z")
+        const d2 = new Date("2021-06-15T12:30:00.000Z")
+        const d3 = new Date("2022-12-31T23:59:59.999Z")
+
+        await table.insertMany([
+            { id: "date1", val: d1 },
+            { id: "date2", val: d2 },
+            { id: "date3", val: d3 },
+            { id: "dateNull", val: null },
+        ])
+
+        // 读取与类型保留
+        const got2 = await table.get("date2")
+        expect(got2).toBeDefined()
+        expect(got2?.val).toBeInstanceOf(Date)
+        expect(got2?.val).toEqual(d2)
+
+        // 精确匹配查询
+        const exact = await table.findOne({ val: d1 })
+        expect(exact).toBeDefined()
+        expect(exact?.id).toBe("date1")
+
+        // 范围查询： $gt / $lt
+        const gtRes = await table.findMany({ val: { $gt: new Date("2021-01-01T00:00:00.000Z") } })
+        expect(gtRes.map((r) => r.id).sort()).toEqual(["date2", "date3"])
+
+        const ltRes = await table.findMany({ val: { $lt: new Date("2021-01-01T00:00:00.000Z") } })
+        expect(ltRes.map((r) => r.id)).toEqual(["date1"])
+
+        // 边界包含查询 $gte / $lte
+        const between = await table.findMany({ val: { $gte: d2, $lte: d3 } })
+        expect(between.map((r) => r.id).sort()).toEqual(["date2", "date3"])
+
+        // $in 查询
+        const inRes = await table.findMany({ val: { $in: [d2, new Date("2030-01-01T00:00:00.000Z")] } })
+        expect(inRes.length).toBe(1)
+        expect(inRes[0].id).toBe("date2")
+
+        // 按时间排序（在内存中验证）。排除 null 值，确保日期顺序正确
+        const all = await table.findMany({})
+        const dateDocs = all
+            .filter((d) => d.val instanceof Date)
+            .sort((a, b) => (a.val as Date).getTime() - (b.val as Date).getTime())
+        expect(dateDocs.map((d) => d.id)).toEqual(["date1", "date2", "date3"])
+
+        // 更新日期字段
+        const newDate = new Date("2025-05-05T05:05:05.000Z")
+        await table.updateOne({ id: "date1" }, { $set: { val: newDate } })
+        const afterUpd = await table.get("date1")
+        expect(afterUpd?.val).toBeInstanceOf(Date)
+        expect(afterUpd?.val).toEqual(newDate)
+
+        // 嵌套对象中的 Date 查询与更新
+        await table.insertOne({ id: "nested_date", obj: { d: new Date("2000-01-01T00:00:00.000Z") } })
+        const nestedFound = await table.findOne({ "obj.d": new Date("2000-01-01T00:00:00.000Z") })
+        expect(nestedFound).toBeDefined()
+
+        await table.updateOne({ id: "nested_date" }, { $set: { "obj.d": new Date("2001-02-03T04:05:06.000Z") } })
+        const nestedAfter = await table.get("nested_date")
+        expect(nestedAfter?.obj?.d).toBeInstanceOf(Date)
+        expect(nestedAfter?.obj?.d).toEqual(new Date("2001-02-03T04:05:06.000Z"))
     })
 })

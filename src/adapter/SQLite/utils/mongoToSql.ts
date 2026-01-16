@@ -51,7 +51,11 @@ export interface ISqlQuery {
     offset?: number
 }
 
-export async function mongoToSql(filter: ITableFilter, options?: ITableFindOptions): Promise<ISqlQuery> {
+export async function mongoToSql(
+    filter: ITableFilter,
+    options?: ITableFindOptions,
+    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean }>
+): Promise<ISqlQuery> {
     const conditions: string[] = []
     const params: any[] = []
 
@@ -61,7 +65,7 @@ export async function mongoToSql(filter: ITableFilter, options?: ITableFindOptio
         const indexedFields = options?.indexedFields as Set<string> | undefined
         // @ts-ignore
         const tableName = options?.tableName as string | undefined
-        await parseFilterNode(filter, conditions, params, indexedFields, tableName)
+        await parseFilterNode(filter, conditions, params, indexedFields, tableName, schemaStats)
     }
 
     if (conditions.length === 0) conditions.push("1=1")
@@ -108,7 +112,8 @@ async function parseFilterNode(
     conditions: string[],
     params: any[],
     indexedFields?: Set<string>,
-    tableName?: string
+    tableName?: string,
+    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean }>
 ) {
     for (const key in node) {
         if (key === "$and") {
@@ -117,7 +122,7 @@ async function parseFilterNode(
                 const group: string[] = []
                 for (const sub of subs) {
                     const subConds: string[] = []
-                    await parseFilterNode(sub, subConds, params, indexedFields, tableName)
+                    await parseFilterNode(sub, subConds, params, indexedFields, tableName, schemaStats)
                     if (subConds.length > 0) group.push(`(${subConds.join(" AND ")})`)
                 }
                 if (group.length > 0) conditions.push(`(${group.join(" AND ")})`)
@@ -128,7 +133,7 @@ async function parseFilterNode(
                 const group: string[] = []
                 for (const sub of subs) {
                     const subConds: string[] = []
-                    await parseFilterNode(sub, subConds, params, indexedFields, tableName)
+                    await parseFilterNode(sub, subConds, params, indexedFields, tableName, schemaStats)
                     if (subConds.length > 0) group.push(`(${subConds.join(" AND ")})`)
                 }
                 if (group.length > 0) conditions.push(`(${group.join(" OR ")})`)
@@ -140,7 +145,7 @@ async function parseFilterNode(
             // Ignore (Handled by JsMatch)
         } else {
             const value = (node as any)[key]
-            await parseFieldCondition(key, value, conditions, params, indexedFields, tableName)
+            await parseFieldCondition(key, value, conditions, params, indexedFields, tableName, schemaStats)
         }
     }
 }
@@ -151,7 +156,8 @@ async function parseFieldCondition(
     conditions: string[],
     params: any[],
     indexedFields?: Set<string>,
-    tableName?: string
+    tableName?: string,
+    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean }>
 ) {
     // 检查是否是纯数字索引路径（如 "tags.2" 或 "items.0.name"）
     // 这种路径 SQLite 可以正确处理
@@ -165,10 +171,18 @@ async function parseFieldCondition(
 
     // 包含点号的路径，但不是纯数字索引路径，可能涉及数组展开
     // 例如 "items.x" 查询数组元素属性，SQLite 的 json_extract 不支持
-    // 使用 1=1 让 JsMatch 处理
+    // 但是，如果 analyzeQueryCompatibility 已经判定它是安全的（即父路径不是数组），
+    // 那么这里就应该生成对应的 json_extract 路径。
+    // 所以我们不再这里直接排除，而是生成对应的 JSON Path，例如 "$.items.x"。
+
+    // 原来的校验逻辑移除，让下面通用逻辑处理。
+    // 但是要确保生成的 JSON Path 是正确的。
+    // logic below: "tags.2" -> "$.tags[2]", "items.a" -> "$.items.a"
+
+    // 如果 isNumericIndexPath 是 false，但也包含点号
+    // 只要排除 id/_id
     if (path.includes(".") && !isNumericIndexPath && path !== "id" && path !== "_id") {
-        conditions.push("1=1")
-        return
+        // Let it fall through, do NOT push 1=1 and return.
     }
 
     let colExpr = ""
@@ -204,8 +218,56 @@ async function parseFieldCondition(
         } else if (isSafeForEquality(value)) {
             // MongoDB 允许简单值查询匹配数组字段（隐式 $in）
             // 例如 { tags: "red" } 可以匹配 tags: ["red", "blue"]
-            // 由于 SQL 无法精确表达这种语义，使用 1=1 让 JsMatch 处理
-            conditions.push("1=1")
+
+            // 特殊处理：id 和 _id 字段是标量，必须使用 SQL
+            if (path === "id" || path === "_id") {
+                await addCondition(colExpr, "=", value, conditions, params, indexedFields, tableName, true)
+            } else {
+                // 对于普通字段，由于可能存在数组隐式匹配语义，且 SQL 无法直接表达（除非有侧表），
+                // 暂时生成 1=1，依赖 isQuerySqlCompatible 返回 false 来启用 JsMatch。
+                // *注*：如果字段有索引，`addCondition` 内部会生成 Side Table 查询，这也是安全的。
+                // 我们可以尝试让有索引的字段也走 addCondition？
+                // 
+                // 为了修复 bug，至少 id/_id 必须走 addCondition。
+                // 
+                // 针对有索引的字段，如果我们确信 Side Table 覆盖了所有情况（包括数组包含），也可以走 addCondition。
+                // 目前为了安全，仅对 id/_id 强制生成 SQL。
+                // 
+                // 优化：如果有侧表索引，我们可以生成 EXISTS 查询，这比 JsMatch 快。
+                const isIndexed = tableName && indexedFields &&
+                    (path === "id" || path === "_id" || (
+                        path.match(/^[a-zA-Z0-9_]+$/) && indexedFields.has(path)
+                    ))
+
+                // 优化：如果字段已知不是数组（Clean Field），则可以直接使用 SQL 相等比较
+                let isCleanScalar = false
+                if (schemaStats) {
+                    // Check if path or any prefix is array
+                    const parts = path.split('.')
+                    let currentPath = ""
+                    let safe = true
+                    for (let part of parts) {
+                        currentPath = currentPath ? `${currentPath}.${part}` : part
+                        const s = schemaStats.get(currentPath)
+                        if (s && s.hasArray) {
+                            safe = false
+                            break
+                        }
+                    }
+                    if (safe) isCleanScalar = true
+                }
+
+                // console.log(`[mongoToSql] path=${path} isIndexed=${!!isIndexed} isCleanScalar=${isCleanScalar} statsSize=${schemaStats?.size}`)
+
+                if (isIndexed) {
+                    await addCondition(colExpr, "=", value, conditions, params, indexedFields, tableName, true)
+                } else if (isCleanScalar) {
+                    // 对于已知非数组的字段，即使没有索引，也可以生成 json_extract(data, '$.path') = val
+                    await addCondition(colExpr, "=", value, conditions, params, indexedFields, tableName, true)
+                } else {
+                    conditions.push("1=1")
+                }
+            }
         } else {
             // SQL 比较的不安全类型（如普通对象），使用 1=1 让 JsMatch 处理
             conditions.push("1=1")
@@ -286,13 +348,27 @@ async function parseFieldCondition(
                                 }
 
                                 if (!optimized) {
-                                    inConditions.push(`${colExpr} IN (${marks})`)
+                                    // 对于非索引数组字段，需要使用 json_each 展开数组检查元素
+                                    // 因为 json_extract 返回整个数组 JSON，而非单个元素
+                                    // 左侧 IN 匹配标量值，右侧 EXISTS 匹配数组元素
+                                    inConditions.push(
+                                        `(${colExpr} IN (${marks}) OR EXISTS (SELECT 1 FROM json_each(${colExpr}) WHERE value IN (${marks})))`
+                                    )
                                 }
 
+                                // 准备参数值
+                                const preparedValues: any[] = []
                                 for (let v of nonNullValues) {
                                     if (colExpr === "id" && typeof v === "number") v = String(v)
                                     const [sVal] = await prepareValue(v)
-                                    params.push(sVal)
+                                    preparedValues.push(sVal)
+                                }
+
+                                // 如果使用了 json_each 回退，需要 push 两次参数（左右两个 IN）
+                                if (!optimized) {
+                                    params.push(...preparedValues, ...preparedValues)
+                                } else {
+                                    params.push(...preparedValues)
                                 }
                             }
 
@@ -359,7 +435,8 @@ async function addCondition(
     conditions: string[],
     params: any[],
     indexedFields?: Set<string>,
-    tableName?: string
+    tableName?: string,
+    isCleanScalar: boolean = false
 ) {
     // 如果列是 'id'，强制作为字符串验证 (SQLite 比较的严格性)
     // prepareValue 处理序列化，但如果是直接 ID 比较，我们要确保输入是字符串
@@ -389,8 +466,8 @@ async function addCondition(
                     typeof val === "boolean"
                         ? `json_type(data, '${path}') = '${val ? "true" : "false"}'`
                         : typeof val === "number"
-                        ? `json_type(data, '${path}') IN ('integer', 'real')`
-                        : "1=1"
+                            ? `json_type(data, '${path}') IN ('integer', 'real')`
+                            : "1=1"
 
                 // 智能优化：Inverted Index (Side Table)
                 const fieldName = path.replace(/^\$\./, "")
@@ -409,15 +486,20 @@ async function addCondition(
                     // 以避免简单字符串比较中的空格/格式不匹配
                     if (val instanceof Map || val instanceof Set) {
                         subQuery = `((${col} = json(?) AND ${typeCheck}))`
+                        params.push(sVal)
+                    } else if (isCleanScalar) {
+                        // 优化：如果是 Clean Scalar，直接使用简单比较，不需要 OR 数组逻辑
+                        subQuery = `(${col} = ? AND ${typeCheck})`
+                        params.push(sVal)
                     } else {
                         subQuery = `((${col} = ? AND ${typeCheck}) OR (json_type(data, '${path}') = 'array' AND EXISTS (SELECT 1 FROM json_each(data, '${path}') WHERE value = ?)))`
+                        params.push(sVal)
+                        // 仅为数组检查分支再次 push sVal
+                        if (!(val instanceof Map) && !(val instanceof Set)) {
+                            params.push(sVal)
+                        }
                     }
                     conditions.push(subQuery)
-                    params.push(sVal)
-                    // 仅为数组检查分支再次 push sVal
-                    if (!(val instanceof Map) && !(val instanceof Set)) {
-                        params.push(sVal)
-                    }
                 }
                 return
             }

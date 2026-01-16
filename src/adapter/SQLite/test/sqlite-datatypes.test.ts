@@ -183,7 +183,7 @@ describe("SQLiteAdapter 数据类型测试", () => {
         })
 
         test("Map", async () => {
-            const map = new Map([
+            const map = new Map<any, any>([
                 ["key1", "value1"],
                 ["key2", 123],
                 [42, "numKey"]
@@ -306,11 +306,11 @@ describe("SQLiteAdapter 数据类型测试", () => {
             }
             await table.set(doc.id, doc)
             const result = await table.get(doc.id)
-            expect(result?.data?.date).toBeInstanceOf(Date)
-            expect(result?.data?.map).toBeInstanceOf(Map)
-            expect(result?.data?.set).toBeInstanceOf(Set)
-            expect(result?.data?.nested?.bigint).toBe(BigInt(999))
-            expect(result?.data?.nested?.regex).toBeInstanceOf(RegExp)
+            expect((result?.data as any)?.date).toBeInstanceOf(Date)
+            expect((result?.data as any)?.map).toBeInstanceOf(Map)
+            expect((result?.data as any)?.set).toBeInstanceOf(Set)
+            expect((result?.data as any)?.nested?.bigint).toBe(BigInt(999))
+            expect((result?.data as any)?.nested?.regex).toBeInstanceOf(RegExp)
         })
     })
 
@@ -343,8 +343,8 @@ describe("SQLiteAdapter 数据类型测试", () => {
             const doc = { id: "arr3", value: arr }
             await table.set(doc.id, doc)
             const result = await table.get(doc.id)
-            expect(result?.value?.[0]).toBe("first")
-            expect(result?.value?.[5]).toBe("sixth")
+            expect((result?.value as any)?.[0]).toBe("first")
+            expect((result?.value as any)?.[5]).toBe("sixth")
         })
     })
 
@@ -606,7 +606,7 @@ describe("SQLiteAdapter 数据类型测试", () => {
             const doc = { id: "edge2", value: longStr }
             await table.set(doc.id, doc)
             const result = await table.get(doc.id)
-            expect(result?.value?.length).toBe(100000)
+            expect((result?.value as any)?.length).toBe(100000)
         })
 
         test("深度嵌套 (10 层)", async () => {
@@ -621,7 +621,7 @@ describe("SQLiteAdapter 数据类型测试", () => {
             // 验证最深层
             let current = result
             for (let i = 0; i < 10; i++) {
-                current = current?.nested
+                current = (current as any)?.nested
             }
             expect(current?.value).toBe("deep")
         })
@@ -659,10 +659,10 @@ describe("SQLiteAdapter 数据类型测试", () => {
             const doc = { id: "edge6", arr: [1, null, undefined, 2] }
             await table.set(doc.id, doc)
             const result = await table.get(doc.id)
-            expect(result?.arr?.[0]).toBe(1)
-            expect(result?.arr?.[1]).toBe(null)
-            expect(result?.arr?.[2]).toBe(null) // undefined 转换为 null
-            expect(result?.arr?.[3]).toBe(2)
+            expect((result?.arr as any)?.[0]).toBe(1)
+            expect((result?.arr as any)?.[1]).toBe(null)
+            expect((result?.arr as any)?.[2]).toBe(null) // undefined 转换为 null
+            expect((result?.arr as any)?.[3]).toBe(2)
         })
 
         test("循环引用应该报错或处理", async () => {

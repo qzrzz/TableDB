@@ -128,7 +128,7 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
     }
     /** 设置单个文档 */
     async set(id: any, doc: Partial<TSchema>): Promise<void> {
-        ;(doc as any).id = id
+        ; (doc as any).id = id
         this.__check_input_doc(doc)
         return this.adapter.set(id, doc)
     }
@@ -152,10 +152,10 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
         return this.adapter.has(id)
     }
     /** 统计文档数量 */
-    async count(filter?: ITableFilter, options?: ITableGetBaseOptions) {
+    async count(filter?: ITableFilter, options?: ITableGetBaseOptions & { debug?: any }) {
         if (!filter) filter = {}
         this.__check_filter(filter, options)
-        return this.adapter.count(filter)
+        return this.adapter.count(filter, options)
     }
     /** 清空所有文档 */
     async clear() {

@@ -17,29 +17,52 @@ import {
     ITableSetResult,
     ITableUpdateOptions,
     ITableUpdateResult,
+    ITableDebugResult,
 } from "../adapter"
 import { ITableFilter, ITableUpdateOp } from "../../core/types"
 import { deserialize, serialize, serializeSync, fastDeserialize } from "./utils/serializer"
 import { mongoToSql } from "./utils/mongoToSql"
 import { matches } from "./utils/matcher"
-import { applyUpdate, flattenObject, deepMergeWithArrayUnion } from "./utils/patch"
+import { applyUpdate, deepMergeWithArrayUnion } from "./utils/patch"
+import { project, normalizeProjection } from "./utils/projection"
+import { analyzeQueryCompatibility, isQuerySqlCompatible } from "./utils/queryAnalysis"
 
 /**
- * 规范化投影参数（数组转对象）
+ * SQLiteAdapter 机制说明文档
+ * ===============================================
+ *
+ * 核心设计目标：
+ * 在 SQLite 上提供高性能、全功能的 MongoDB 风格文档数据库体验。
+ *
+ * 关键机制 (Key Mechanisms):
+ * 
+ * 1. 侧表倒排索引 (Side Table Inverted Index):
+ *    - 问题: 对于数组字段查询 (e.g. { tags: "A" })，SQLite 原生 JSON 函数需要全表扫描。
+ *    - 解决: 为数组字段创建辅助表 `_idx_{tableName}_{field}`，存储 `(val, id)` 对。
+ *    - 实现: 使用 SQLite Triggers 自动维护侧表数据（Insert/Update/Delete 时自动触发）。
+ *    - 效果: 将 Array Containment 查询转化为高效的 SQL `EXISTS` 子查询。
+ * 
+ * 2. Schema 脏检测与查询优化 (Schema Dirty Tracking & Query Optimization):
+ *    - 问题: 混合模式 (Hybrid Mode) 虽然万能但较慢，纯 SQL 模式快但可能语义不准确（特别是数组隐式包含）。
+ *    - 解决: 维护 `_schema_dirty_{tableName}` 表，记录哪些字段曾经存储过数组或特殊值 (NaN/Null)。
+ *    - 策略: 
+ *      - 如果某字段以前从未存过数组，那么 `{ field: "A" }` 可以安全视为 SQL 相等比较。
+ *      - 如果存过数组，则必须回退到 JsMatch 或使用侧表。
+ * 
+ * 3. 混合查询执行 (Hybrid Query Execution):
+ *    - 纯 SQL 模式 (SQL Mode): 当 Filter 可以完全无损映射为 SQL 时使用，性能最高。
+ *    - 混合模式 (Hybrid Mode): `SELECT ... WHERE (SQL_PreFilter) AND JsMatch(data, filter)`
+ *      - 利用 SQL 索引进行粗筛。
+ *      - 利用自定义 SQLite 函数 `JsMatch` 在内存中运行 JS 逻辑进行精确匹配。
+ *      - 保证了 MongoDB 语义的 100% 兼容性 (Regular Expressions, $where, complex logic)。
+ * 
+ * 4. 批量操作优化:
+ *    - 批量插入优化: 临时禁用侧表 Trigger -> 批量插入数据 -> 批量 Rebuild 侧表 -> 恢复 Trigger。
+ *    - 批量更新优化 (bulkUpdateSync): 在单个事务中执行所有操作，减少 I/O 和上下文切换。
  */
-function normalizeProjection(proj?: string[] | Record<string, 1 | -1 | 0>): Record<string, number> | undefined {
-    if (!proj) return undefined
-    if (Array.isArray(proj)) {
-        const projObj: Record<string, 1> = {}
-        proj.forEach((p) => (projObj[p] = 1))
-        return projObj
-    }
-    return proj as Record<string, number>
-}
 
 export function SQLiteAdapter(config: { filename: string; safe?: boolean | "full"; zstd?: boolean }): ITableDBAdapter {
     let db: Database.Database
-
 
     function getDb() {
         if (!db) {
@@ -54,18 +77,21 @@ export function SQLiteAdapter(config: { filename: string; safe?: boolean | "full
                     mkdirSync(dir, { recursive: true })
 
                     if (config.zstd) {
+                        // 检查并解压 ZSTD 压缩的数据库文件
                         checkAndDecompressDb(filename)
                     }
                 } catch (error) {
-                    // 如果目录创建失败，让 Database 构造函数处理错误
                     console.warn(`Warning: Could not ensure directory exists for ${filename}:`, error)
                 }
             }
 
             db = new Database(filename)
+            // WAL 模式可显著提高并发写入性能
             db.pragma("journal_mode = WAL")
 
-            // 如果不需要完全的安全性，可以关闭同步以提升性能
+            // 根据安全配置调整同步等级
+            // OFF: 最快，但系统崩溃可能丢数据
+            // FULL: 最安全，每次写入都落盘
             if (!config.safe) {
                 db.pragma("synchronous = OFF")
             }
@@ -89,7 +115,16 @@ export function SQLiteAdapter(config: { filename: string; safe?: boolean | "full
     return Adapter
 }
 
+/**
+ * 注册自定义 SQLite 函数
+ * 
+ * @param db SQLite 数据库实例
+ */
 function registerCustomFunctions(db: Database.Database) {
+    /**
+     * JsMatch: 内存匹配函数
+     * 用于 Hybrid 模式，在 SQL 筛选后进行最终的 MongoDB 语义验证。
+     */
     db.function("JsMatch", (docJson: any, idVal: any, filterJson: any) => {
         if (!docJson) return 0
         try {
@@ -102,15 +137,18 @@ function registerCustomFunctions(db: Database.Database) {
         }
     })
 
+    /**
+     * JsPatch: 内存更新函数
+     * 用于在 SQL UPDATE 语句中直接执行 MongoDB 风格的 Update Operator ($set, $push 等)。
+     * 避免了 "Read to JS -> Modify -> Write back" 的往返开销（在部分场景下）。
+     */
     db.function("JsPatch", (docJson: any, opJson: any) => {
         if (!docJson) return null
         try {
             const doc = deserialize(JSON.parse(docJson))
             const op = deserialize(JSON.parse(opJson))
-
             applyUpdate(doc, op)
-
-            // Must use Sync serializer inside Synchronous SQLite function
+            // 必须使用同步序列化器，因为 SQLite 自定义函数必须同步返回
             return JSON.stringify(serializeSync(doc))
         } catch (e) {
             return docJson
@@ -122,12 +160,16 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     name = "SQLiteAdapter"
     private statementCache = new Map<string, Database.Statement>()
     private indexedFields = new Set<string>()
+    // 脏字段缓存: path -> { hasArray: boolean; hasSpecial: boolean }
+    // 用于指导查询分析器选择最佳策略
+    private dirtyFieldCache = new Map<string, { hasArray: boolean; hasSpecial: boolean }>()
 
     constructor(
         private db: Database.Database,
         private tableName: string,
         private config: { filename: string; safe?: boolean | "full"; zstd?: boolean }
     ) {
+        // 1. 确保存储表存在
         this.getStatement(`
             CREATE TABLE IF NOT EXISTS "${tableName}" (
                 _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,9 +178,98 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             )
         `).run()
 
-        // 初始化时读取已存在的索引
+        // 2. 创建 Schema Dirty 记录表
+        // 用于记录字段类型特征，优化查询计划
+        this.getStatement(`
+            CREATE TABLE IF NOT EXISTS "_schema_dirty_${tableName}" (
+                path TEXT PRIMARY KEY,
+                hasArray INTEGER DEFAULT 0,
+                hasSpecial INTEGER DEFAULT 0
+            )
+        `).run()
+
         this.loadExistingIndexes()
+        this.loadDirtyFields()
     }
+
+    // --- Schema Dirty Tracking ---
+
+    private loadDirtyFields() {
+        try {
+            const rows = this.getStatement(`SELECT path, hasArray, hasSpecial FROM "_schema_dirty_${this.tableName}"`).all() as any[]
+            for (const row of rows) {
+                this.dirtyFieldCache.set(row.path, {
+                    hasArray: !!row.hasArray,
+                    hasSpecial: !!row.hasSpecial
+                })
+            }
+        } catch (e) {
+            // 忽略表不存在错误（理论上不会发生）
+        }
+    }
+
+    private markFieldDirty(path: string, type: 'array' | 'special') {
+        let entry = this.dirtyFieldCache.get(path)
+        if (!entry) {
+            entry = { hasArray: false, hasSpecial: false }
+            this.dirtyFieldCache.set(path, entry)
+        }
+
+        let changed = false
+        if (type === 'array' && !entry.hasArray) {
+            entry.hasArray = true
+            changed = true
+        }
+        if (type === 'special' && !entry.hasSpecial) {
+            entry.hasSpecial = true
+            changed = true
+        }
+
+        if (changed) {
+            // 使用 UPSERT 更新数据库记录
+            this.getStatement(`
+                INSERT INTO "_schema_dirty_${this.tableName}" (path, hasArray, hasSpecial)
+                VALUES (?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    hasArray = MAX(hasArray, excluded.hasArray),
+                    hasSpecial = MAX(hasSpecial, excluded.hasSpecial)
+            `).run(path, entry.hasArray ? 1 : 0, entry.hasSpecial ? 1 : 0)
+        }
+    }
+
+    /**
+     * 扫描文档并标记脏字段
+     * 在写入文档前调用，用于更新 Schema 统计信息
+     */
+    private scanAndMarkDirty(doc: any, prefix = "") {
+        if (!doc || typeof doc !== 'object') return
+
+        for (const key in doc) {
+            const val = doc[key]
+            const path = prefix ? `${prefix}.${key}` : key
+
+            // 检查特殊值 (null, undefined, NaN, Infinite)
+            // 这些值在 SQL 中处理较为棘手，需要 Hybrid 模式兜底
+            if (val === null || val === undefined) {
+                this.markFieldDirty(path, 'special')
+                continue
+            }
+            if (typeof val === 'number' && (!Number.isFinite(val) || Number.isNaN(val))) {
+                this.markFieldDirty(path, 'special')
+                continue
+            }
+
+            if (Array.isArray(val)) {
+                this.markFieldDirty(path, 'array')
+                // 递归检查数组元素，通常用于 Object Array
+                val.forEach(item => this.scanAndMarkDirty(item, path))
+            } else if (typeof val === 'object' && !(val instanceof Date) && !Buffer.isBuffer(val)) {
+                this.scanAndMarkDirty(val, path)
+            }
+        }
+    }
+
+    // --- Helper Methods ---
 
     private loadExistingIndexes() {
         const idxs = this.db
@@ -148,13 +279,12 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             .all(this.tableName) as { name: string; sql: string }[]
 
         for (const idx of idxs) {
-            // 解析 SQL 来获取索引字段
-            // CREATE INDEX "idx_age" ON "test" (json_extract(data, '$.age'))
+            // 通过解析 SQL 语句判断是否为 JSON 索引
             const match = idx.sql?.match(/json_extract\(data, '\$\.([^']+)'\)/)
             if (match && match[1]) {
                 const field = match[1]
-                // 检查对应的 Side Table 是否存在
                 const sideTableName = this.getSideTableName(field)
+                // 检查对应的侧表是否存在
                 const exists = this.db
                     .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`)
                     .get(sideTableName)
@@ -175,15 +305,16 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     /**
-     * 将对象中所有 undefined 转换为 null，保持 MongoDB 一致性
-     * 注意：不处理 Map、Set、Date、Buffer 等特殊类型，由 serialize/deserialize 处理
+     * 数据规范化：处理 undefined 和特殊对象类型
+     * - undefined -> null (JSON 标准)
+     * - 保留 Map, Set, Date, BigInt, Blob 等特殊类型 (Serializer 会处理)
      */
     private normalizeUndefined(obj: any): any {
         if (obj === undefined) return null
         if (obj === null) return null
         if (typeof obj !== "object") return obj
 
-        // 跳过特殊对象类型（由 serialize/deserialize 处理）
+        // 保留特殊类型，不进行递归转换
         if (
             obj instanceof Map ||
             obj instanceof Set ||
@@ -203,10 +334,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             return obj.map((item) => this.normalizeUndefined(item))
         }
 
-        // 普通对象：递归处理
+        // 仅处理普通对象
         const isPlain = obj.constructor === Object || obj.constructor === undefined
         if (!isPlain) {
-            // 不是普通对象（可能是自定义类实例），不处理
             return obj
         }
 
@@ -217,18 +347,19 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return normalized
     }
 
+    // --- CRUD Operations ---
+
     async get(id: any): Promise<ITableDoc | void> {
         const row = this.getStatement(`SELECT data FROM "${this.tableName}" WHERE id = ?`).get(String(id)) as
             | { data: string }
             | undefined
         if (!row) return undefined
-        // 使用快速反序列化，若无特殊类型则跳过完整 deserialize 流程
         return fastDeserialize(row.data)
     }
 
     async set(id: any, value: ITableDoc): Promise<void> {
-        // Use Async serialize (supports Blobs)
         const normalizedValue = this.normalizeUndefined(value)
+        this.scanAndMarkDirty(normalizedValue)
         const sVal = await serialize(normalizedValue)
         this.getStatement(
             `
@@ -248,14 +379,26 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return !!row
     }
 
-    async count(filter?: ITableFilter): Promise<number> {
+    async count(filter?: ITableFilter, options?: { debug?: ITableDebugResult }): Promise<number> {
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
+
+        if (debug && filter) {
+            const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
+            options!.debug!.strategy = analysis.compatible ? "SQL" : "HYBRID"
+            options!.debug!.dirtyReasons = analysis.reasons
+            debug.setPrepareTime()
+        }
+
         if (!filter || Object.keys(filter).length === 0) {
+            if (debug) debug.finish()
             const res = this.getStatement(`SELECT count(*) as count FROM "${this.tableName}"`).get() as { count: number }
             return res.count
         }
 
-        const q = await mongoToSql(filter, { indexedFields: this.indexedFields, tableName: this.tableName } as any)
-        const isCompatible = isQuerySqlCompatible(filter)
+        // 生成 SQL WHERE 子句
+        const q = await mongoToSql(filter, { indexedFields: this.indexedFields, tableName: this.tableName } as any, this.dirtyFieldCache)
+        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
 
         let sql = ""
         let params = q.params
@@ -263,12 +406,30 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         if (isCompatible) {
             sql = `SELECT count(*) as count FROM "${this.tableName}" WHERE (${q.where})`
         } else {
+            // 混合策略: 先用 SQL 筛选，再用 JsMatch 验证
             sql = `SELECT count(*) as count FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
             const sFilter = JSON.stringify(await serialize(filter))
             params = [...params, sFilter]
         }
 
+        if (debug) {
+            try {
+                const plan = this.getStatement(`EXPLAIN QUERY PLAN ${sql}`).all(...params)
+                options!.debug!.sqlPlan = plan as any
+                options!.debug!.isFullScan = plan.some((row: any) => row.detail.includes("SCAN TABLE") && !row.detail.includes("USING INDEX"))
+            } catch (e) { }
+        }
+
+        const tStart = performance.now()
         const res = this.getStatement(sql).get(...params) as { count: number }
+        const tEnd = performance.now()
+
+        if (debug) {
+            debug.addSql(sql, params, tEnd - tStart)
+            debug.setDbExecTime(tEnd - tStart)
+            debug.finish()
+        }
+
         return res.count
     }
 
@@ -286,80 +447,120 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async close(): Promise<void> {
-        // Clear cache statements if needed? managed by db connection usually.
         this.statementCache.clear()
-
         if (this.db && this.db.open) {
             const shouldCompress = this.config.zstd && this.config.filename && !this.config.filename.startsWith(":memory:")
-
             if (shouldCompress) {
                 prepareForCompression(this.db)
             }
             this.db.close()
-
             if (shouldCompress) {
                 await compressFile(this.config.filename)
             }
         }
     }
 
+    // --- Advanced MongoDB-Style Operations ---
+
     async findMany(filter: ITableFilter, options?: ITableFindOptions): Promise<ITableDoc[]> {
-        const q = await mongoToSql(filter, { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any)
-        const isCompatible = isQuerySqlCompatible(filter)
+        let isCompatible = true
+        let debug: DebugCollector | undefined
+
+        if (options?.debug) {
+            debug = new DebugCollector(options.debug)
+        }
+
+        if ((options as any)?.skip) {
+            throw new Error("skip is not supported, please use limit and offset instead.")
+        }
+
+        const q = await mongoToSql(filter, { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any, this.dirtyFieldCache)
+
+        // 策略分析 (Strategy Analysis)
+        if (debug) {
+            const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
+            isCompatible = analysis.compatible
+            options!.debug!.strategy = isCompatible ? "SQL" : "HYBRID"
+            options!.debug!.dirtyReasons = analysis.reasons
+            debug.setPrepareTime()
+        } else {
+            isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
+        }
 
         let sql = ""
         let params = q.params
 
-        // Select _id always to optionally return it
         if (isCompatible) {
+            // 策略 1: 纯 SQL 模式
             sql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where})`
         } else {
+            // 策略 2: 混合模式
             sql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
             const sFilter = JSON.stringify(await serialize(filter))
             params = [...params, sFilter]
         }
 
         if (q.sort) sql += ` ORDER BY ${q.sort}`
-        // SQLite 要求 OFFSET 必须与 LIMIT 一起使用
-        // MongoDB 行为：limit: 0 被忽略，返回所有文档
         if (q.limit !== undefined && q.limit !== 0) {
             sql += ` LIMIT ${q.limit}`
         } else if (q.offset !== undefined) {
-            // 如果只有 offset 没有 limit（或 limit 为 0），使用 -1 表示无限制
+            // SQLite REQUIRE limit implicitly if offset used
             sql += ` LIMIT -1`
         }
         if (q.offset !== undefined) sql += ` OFFSET ${q.offset}`
 
-        const rows = this.getStatement(sql).all(...params)
+        if (debug) {
+            options!.debug!.isSideTableUsed = sql.includes(`_idx_${this.tableName}`)
+            try {
+                const plan = this.getStatement(`EXPLAIN QUERY PLAN ${sql}`).all(...params)
+                options!.debug!.sqlPlan = plan as any
+                options!.debug!.isFullScan = plan.some((row: any) => row.detail.includes("SCAN TABLE") && !row.detail.includes("USING INDEX"))
+            } catch (e) { /* ignore */ }
+        }
 
-        // 处理 projection
+        const stmt = this.getStatement(sql)
+        const tStart = performance.now()
+        const rows = stmt.all(...params)
+        const tEnd = performance.now()
+
+        if (debug) {
+            debug.addSql(sql, params, tEnd - tStart)
+            debug.setDbExecTime(tEnd - tStart)
+        }
+
         const proj = normalizeProjection(options?.projection)
 
+        // 投影优化：如果仅请求 _id，直接返回无需反序列化
         if (proj) {
-            // 检查是否只有 { _id: 1 }，这种情况表示用户想要全部字段 + _id
             const projKeys = Object.keys(proj)
             const isOnlyIdInclusion = projKeys.length === 1 && projKeys[0] === "_id" && proj["_id"] === 1
 
             if (isOnlyIdInclusion) {
-                // 返回全部字段 + _id
-                return rows.map((r: any) => {
+                const docs = rows.map((r: any) => {
                     const d = fastDeserialize(r.data)
                     d._id = r._id
                     return d
                 })
+                if (debug) debug.finish()
+                return docs
             }
-
-            // 有其他 projection 字段
-            return rows.map((r: any) => {
-                const d = fastDeserialize(r.data)
-                d._id = r._id
-                return project(d, proj)
-            })
         }
 
-        // No projection: Do NOT return _id
-        // 使用快速反序列化，若无特殊类型则跳过完整 deserialize 流程
-        return rows.map((r: any) => fastDeserialize(r.data))
+        const docs = rows.map((r: any) => {
+            const d = fastDeserialize(r.data)
+            d._id = r._id
+
+            // 应用投影：移除不需要的字段
+            const p = project(d, proj)
+            // 默认行为：移除 _id，除非显式请求
+            if (!proj || (proj && !proj._id)) {
+                delete p._id
+            }
+            return p
+        })
+
+        if (debug) debug.finish()
+        return docs
     }
 
     async findOne(filter: ITableFilter, options?: ITableFindOptions): Promise<ITableDoc | void> {
@@ -368,35 +569,81 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return docs[0]
     }
 
-    // ... (rest of methods) ...
-
     async updateMany(
         filter: ITableFilter,
         updateOp: ITableUpdateOp<ITableDoc>,
         options?: ITableUpdateOptions
     ): Promise<ITableUpdateResult> {
-        const q = await mongoToSql(filter, { indexedFields: this.indexedFields, tableName: this.tableName } as any)
-        const normalizedOp = this.normalizeUndefined(updateOp)
-        const sOp = JSON.stringify(await serialize(normalizedOp))
-        const isCompatible = isQuerySqlCompatible(filter)
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
 
-        let sql = ""
-        let params: any[] = []
-
-        if (isCompatible) {
-            sql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE (${q.where})`
-            params = [sOp, ...q.params]
-        } else {
-            const sFilter = JSON.stringify(await serialize(filter))
-            sql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE (${q.where}) AND JsMatch(data, _id, ?)`
-            params = [sOp, ...q.params, sFilter]
+        if (debug) {
+            const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
+            options!.debug!.dirtyReasons = analysis.reasons
+            options!.debug!.strategy = analysis.compatible ? "SQL" : "HYBRID"
         }
 
-        const info = this.getStatement(sql).run(...params)
+        const q = await mongoToSql(filter, { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any, this.dirtyFieldCache)
+        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
 
-        let modifiedCount = info.changes
-        let matchedCount = info.changes
+        let selectSql = ""
+        let params = q.params
 
+        if (isCompatible) {
+            selectSql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where})`
+        } else {
+            selectSql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+            const sFilter = JSON.stringify(await serialize(filter))
+            params = [...params, sFilter]
+        }
+
+        if (debug) {
+            debug.setPrepareTime()
+            try {
+                const plan = this.getStatement(`EXPLAIN QUERY PLAN ${selectSql}`).all(...params)
+                options!.debug!.sqlPlan = plan as any
+            } catch (e) { }
+            debug.addSql(selectSql, params, 0)
+        }
+
+        const rows = this.getStatement(selectSql).all(...params) as { _id: number; data: string }[]
+
+        let modifiedCount = 0
+        let matchedCount = 0
+
+        const normalizedOp = this.normalizeUndefined(updateOp)
+        const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = ? WHERE _id = ?`)
+
+        // 事务：确保原子性
+        const tx = this.db.transaction(() => {
+            for (const row of rows) {
+                matchedCount++
+                try {
+                    const doc = fastDeserialize(row.data)
+                    doc._id = row._id
+                    // 内存应用更新
+                    const modified = applyUpdate(doc, normalizedOp)
+                    if (modified) {
+                        delete doc._id
+                        this.scanAndMarkDirty(doc)
+                        const sDoc = JSON.stringify(serializeSync(doc))
+                        updateStmt.run(sDoc, row._id)
+                        modifiedCount++
+                    }
+                } catch (e) { }
+            }
+        })
+
+        const tStart = performance.now()
+        tx()
+        const tEnd = performance.now()
+
+        if (debug) {
+            debug.setDbExecTime(tEnd - tStart)
+            debug.finish()
+        }
+
+        // Upsert 逻辑
         if (matchedCount === 0 && options?.upsert) {
             const newDoc: any = {}
             for (const key in filter) {
@@ -412,6 +659,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             if (idFromFilter) newDoc.id = idFromFilter
             else newDoc.id = String(Date.now() + Math.random())
 
+            const normalizedOp = this.normalizeUndefined(updateOp)
             applyUpdate(newDoc, normalizedOp)
             if (normalizedOp.$setOnInsert) {
                 const setOnInsertOp = { $set: normalizedOp.$setOnInsert }
@@ -422,24 +670,23 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             return { matchedCount: 0, modifiedCount: 0, upsertedIds: [newDoc.id] }
         }
 
-        return { matchedCount, modifiedCount }
+        return { matchedCount, modifiedCount, upsertedIds: [] }
     }
 
     async bulkUpdate(
-        updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[]
+        updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[],
+        options?: { debug?: ITableDebugResult }
     ): Promise<ITableUpdateResult> {
         let matchedCount = 0
         let modifiedCount = 0
         const upsertedIds: any[] = []
 
-        // 使用事务包装批量更新，提升写入性能
-        const bulkUpdateTx = this.db.transaction(() => {
-            // 注意：由于 updateOne 是异步的，这里需要同步处理
-            // 事务内部的操作实际上是同步的，但我们需要处理异步序列化
-        })
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
+        if (debug) debug.setPrepareTime()
 
-        // 由于 serialize 是异步的，我们无法在纯同步事务中使用
-        // 所以我们先预处理数据，再在事务中执行同步操作
+        const tStart = performance.now()
+        // 此处无法使用事务包裹，因为 updateOne 内部可能含有异步逻辑
         for (const item of updates) {
             try {
                 const res = await this.updateOne(item.filter, item.updateOp, item.options)
@@ -449,26 +696,31 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                     upsertedIds.push(...res.upsertedIds)
                 }
             } catch (e) {
-                // Simulate ordered: false, ignore error
                 console.error("bulkUpdate error:", e)
             }
+        }
+        const tEnd = performance.now()
+
+        if (debug) {
+            debug.setDbExecTime(tEnd - tStart)
+            debug.finish()
         }
 
         return { matchedCount, modifiedCount, upsertedIds: upsertedIds.length > 0 ? upsertedIds : undefined }
     }
 
-    /**
-     * 批量更新（同步事务优化版）
-     * 预先序列化所有数据，然后在单个事务中执行所有更新
-     */
     async bulkUpdateSync(
-        updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[]
+        updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[],
+        options?: { debug?: ITableDebugResult }
     ): Promise<ITableUpdateResult> {
+        // ... (原逻辑保持不变)
         let matchedCount = 0
         let modifiedCount = 0
         const upsertedIds: any[] = []
 
-        // 预先准备所有更新操作的数据
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
+
         const preparedUpdates: Array<{
             selectSql: string
             params: any[]
@@ -478,15 +730,18 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             filter: ITableFilter
         }> = []
 
+        const tPrepStart = performance.now()
+
+        // 1. 预处理阶段
         for (const item of updates) {
             const q = await mongoToSql(item.filter, {
                 sort: item.options?.sort,
                 indexedFields: this.indexedFields,
-                tableName: this.tableName
-            } as any)
-            q.limit = 1
+                tableName: this.tableName,
+            } as any, this.dirtyFieldCache)
 
-            const isCompatible = isQuerySqlCompatible(item.filter)
+            q.limit = 1
+            const isCompatible = isQuerySqlCompatible(item.filter, this.dirtyFieldCache)
             let selectSql = ""
             let params = q.params
 
@@ -510,24 +765,24 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 sOp,
                 normalizedOp,
                 options: item.options,
-                filter: item.filter
+                filter: item.filter,
             })
         }
 
-        // 在单个事务中执行所有更新
+        if (debug) {
+            options!.debug!.prepareTimeMs = performance.now() - tPrepStart
+        }
+
+        const tExecStart = performance.now()
+        // 2. 执行阶段 (事务中)
         const bulkUpdateTx = this.db.transaction(() => {
             for (const prepared of preparedUpdates) {
                 try {
                     const row = this.getStatement(prepared.selectSql).get(...prepared.params)
-
                     if (!row) {
-                        if (prepared.options?.upsert) {
-                            // upsert 逻辑需要异步，这里简化处理
-                            // 复杂的 upsert 应该使用普通的 bulkUpdate
-                        }
-                        continue
+                        continue // 原有代码确实忽略简化的 upsert
                     }
-
+                    // JsPatch 优化
                     const updateSql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`
                     this.getStatement(updateSql).run(prepared.sOp, (row as any)._id)
                     matchedCount++
@@ -539,6 +794,13 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         })
 
         bulkUpdateTx()
+        const tExecEnd = performance.now()
+
+        if (debug) {
+            debug.setDbExecTime(tExecEnd - tExecStart)
+            debug.finish()
+        }
+
         return { matchedCount, modifiedCount, upsertedIds: upsertedIds.length > 0 ? upsertedIds : undefined }
     }
 
@@ -547,31 +809,51 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         updateOp: ITableUpdateOp<ITableDoc>,
         options?: ITableUpdateOptions
     ): Promise<ITableUpdateResult> {
-        const q = await mongoToSql(filter, { sort: options?.sort, indexedFields: this.indexedFields, tableName: this.tableName } as any)
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
+
+        if (debug) {
+            const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
+            options!.debug!.dirtyReasons = analysis.reasons
+            options!.debug!.strategy = analysis.compatible ? "SQL" : "HYBRID"
+        }
+
+        const q = await mongoToSql(filter, { sort: options?.sort, indexedFields: this.indexedFields, tableName: this.tableName } as any, this.dirtyFieldCache)
         q.limit = 1
 
-        const isCompatible = isQuerySqlCompatible(filter)
+        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
 
         let selectSql = ""
         let params = q.params
 
         if (isCompatible) {
-            selectSql = `SELECT _id, id FROM "${this.tableName}" WHERE (${q.where})`
+            selectSql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where})`
         } else {
+            selectSql = `SELECT _id, data FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
             const sFilter = JSON.stringify(await serialize(filter))
-            selectSql = `SELECT _id, id FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
             params = [...params, sFilter]
         }
 
         if (q.sort) selectSql += ` ORDER BY ${q.sort}`
-        selectSql += ` LIMIT 1`
+        selectSql += " LIMIT 1"
 
-        // Use _id for faster update if available?
-        // _id is PK. Row ID.
-        // If we select _id, we can update by _id.
-        const row = this.getStatement(selectSql).get(...params)
+        if (debug) {
+            debug.setPrepareTime()
+            try {
+                const plan = this.getStatement(`EXPLAIN QUERY PLAN ${selectSql}`).all(...params)
+                options!.debug!.sqlPlan = plan as any
+            } catch (e) { }
+            debug.addSql(selectSql, params)
+        }
+
+        const tStart = performance.now()
+        const row = this.getStatement(selectSql).get(...params) as { _id: number; data: string }
+        const tEnd = performance.now()
+
+        if (debug) debug.setDbExecTime(tEnd - tStart)
 
         if (!row) {
+            // Upsert Logic
             if (options?.upsert) {
                 const newDoc: any = {}
                 for (const key in filter) {
@@ -593,44 +875,73 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                     const setOnInsertOp = { $set: normalizedOp.$setOnInsert }
                     applyUpdate(newDoc, setOnInsertOp)
                 }
+
+                if (debug) debug.finish()
                 await this.set(newDoc.id, newDoc)
                 return { matchedCount: 0, modifiedCount: 0, upsertedIds: [newDoc.id] }
             }
-            return { matchedCount: 0, modifiedCount: 0 }
+            if (debug) debug.finish()
+            return { matchedCount: 0, modifiedCount: 0, upsertedIds: [] }
         }
 
-        const normalizedOp = this.normalizeUndefined(updateOp)
-        const sOp = JSON.stringify(await serialize(normalizedOp))
-        // Updating by _id is slightly faster/safer if PK changed (unlikely for _id)
-        const updateSql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`
-        this.getStatement(updateSql).run(sOp, (row as any)._id)
+        let modifiedCount = 0
+        try {
+            const doc = fastDeserialize(row.data)
+            doc._id = row._id
 
-        return { matchedCount: 1, modifiedCount: 1 }
+            const normalizedOp = this.normalizeUndefined(updateOp)
+            const modified = applyUpdate(doc, normalizedOp)
+
+            if (modified) {
+                delete doc._id
+                this.scanAndMarkDirty(doc)
+                const sDoc = JSON.stringify(serializeSync(doc))
+                const upSql = `UPDATE "${this.tableName}" SET data = ? WHERE _id = ?`
+                this.getStatement(upSql).run(sDoc, row._id)
+                modifiedCount = 1
+                if (debug) {
+                    debug.addSql(upSql, [sDoc, row._id])
+                }
+            }
+        } catch (e) {
+        }
+
+        if (debug) debug.finish()
+        return { matchedCount: 1, modifiedCount, upsertedIds: [] }
     }
 
-    /**
-     * 批量导入自动优化阈值
-     * 当文档数量超过此值且存在索引时，自动启用高性能导入策略
-     */
     private static BULK_IMPORT_THRESHOLD = 1000
 
-    async insertMany(docs: ITableDoc[]): Promise<ITableInsertResult> {
-        // 自动优化：当文档数量较大且有索引时，使用高性能导入策略
+    async insertMany(docs: ITableDoc[], options?: { debug?: ITableDebugResult }): Promise<ITableInsertResult> {
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
+        if (debug) debug.setPrepareTime()
+
         const shouldOptimize = docs.length >= SQLiteAdapterInstance.BULK_IMPORT_THRESHOLD && this.indexedFields.size > 0
 
+        const tStart = performance.now()
+        let res: ITableInsertResult
         if (shouldOptimize) {
-            return this.insertManyOptimized(docs)
+            res = await this.insertManyOptimized(docs)
+        } else {
+            res = await this.insertManyDefault(docs)
         }
+        const tEnd = performance.now()
 
-        return this.insertManyDefault(docs)
+        if (debug) {
+            options!.debug!.strategy = shouldOptimize ? "BULK_OPT" as any : "SQL"
+            debug.setDbExecTime(tEnd - tStart)
+            debug.finish()
+        }
+        return res
     }
 
     /**
-     * 默认的批量插入实现
+     * 默认批量插入实现
+     * 使用标准事务通过 INSERT 语句逐条插入
      */
     private async insertManyDefault(docs: ITableDoc[]): Promise<ITableInsertResult> {
         const stmt = this.getStatement(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
-
         const result: ITableInsertResult = {
             insertedCount: 0,
             skippedCount: 0,
@@ -641,6 +952,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const serializedInfo: { id: string; data: string }[] = []
         for (const doc of docs) {
             const normalizedDoc = this.normalizeUndefined(doc)
+            this.scanAndMarkDirty(normalizedDoc)
             const sDoc = await serialize(normalizedDoc)
             serializedInfo.push({ id: String(doc.id), data: JSON.stringify(sDoc) })
         }
@@ -668,7 +980,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
     /**
      * 高性能批量插入实现
-     * 禁用触发器 -> 分块插入 -> 重建索引 -> 启用触发器
+     * 
+     * 优化机制：
+     * 1. 禁用 Trigger: 临时禁用侧表维护触发器。
+     * 2. 批量写入: 执行纯数据插入。
+     * 3. 批量重建 (Rebuild): 插入完成后，rebuildSideTableIndexes 一次性回填。
      */
     private async insertManyOptimized(docs: ITableDoc[]): Promise<ITableInsertResult> {
         const result: ITableInsertResult = {
@@ -678,11 +994,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             skippedIds: [],
         }
 
-        // 1. 禁用侧表触发器
         await this.disableSideTableTriggers()
 
         try {
-            // 2. 分块插入（使用默认实现，但触发器已禁用）
             const chunkSize = 1000
             for (let i = 0; i < docs.length; i += chunkSize) {
                 const chunk = docs.slice(i, i + chunkSize)
@@ -692,11 +1006,8 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 result.insertedIds.push(...chunkResult.insertedIds)
                 result.skippedIds.push(...chunkResult.skippedIds)
             }
-
-            // 3. 完成后立即重建侧表索引
             await this.rebuildSideTableIndexes()
         } finally {
-            // 4. 重新启用触发器
             await this.enableSideTableTriggers()
         }
 
@@ -704,13 +1015,16 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async setMany(docs: Partial<ITableDoc>[], options?: ITableSetOptions): Promise<ITableSetResult> {
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
+        if (debug) debug.setPrepareTime()
+
         const result: ITableSetResult = {
             insertedCount: 0,
             overwriteCount: 0,
             insertedIds: [],
         }
 
-        // 预先序列化所有文档数据，用于事务内的同步操作
         const preparedDocs: Array<{
             id: string
             serializedData: string
@@ -719,15 +1033,16 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
         for (const doc of docs) {
             const normalizedDoc = this.normalizeUndefined(doc)
+            this.scanAndMarkDirty(normalizedDoc)
             const sDoc = await serialize(normalizedDoc)
             preparedDocs.push({
                 id: String(doc.id),
                 serializedData: JSON.stringify(sDoc),
-                normalizedDoc
+                normalizedDoc,
             })
         }
 
-        // 使用事务包装所有操作，提升写入性能
+        const tStart = performance.now()
         const setManyTx = this.db.transaction(() => {
             const stmtCheck = this.getStatement(`SELECT data FROM "${this.tableName}" WHERE id = ?`)
             const stmtUpdate = this.getStatement(`UPDATE "${this.tableName}" SET data = ? WHERE id = ?`)
@@ -740,23 +1055,23 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 if (exist) {
                     if (options?.insertOnly) continue
 
+                    // Overwrite 选项优化：直接替换，不进行合并
                     if (options?.overwrite) {
                         stmtUpdate.run(serializedData, id)
                         result.overwriteCount++
                         continue
                     }
 
+                    // Merge 逻辑
                     let finalDoc = deserialize(JSON.parse(exist.data))
                     if (options?.merge) {
-                        // Deep Merge logic with Array Union
                         deepMergeWithArrayUnion(finalDoc, normalizedDoc)
                     } else {
-                        // Default behavior: Merge Top-level fields (like updateOne with $set)
+                        // 默认: 对顶层字段进行 Set 操作
                         const op = { $set: normalizedDoc }
                         applyUpdate(finalDoc, op)
                     }
 
-                    // 注意：这里需要同步序列化，因为在事务内
                     const sFinalDoc = serializeSync(finalDoc)
                     stmtUpdate.run(JSON.stringify(sFinalDoc), id)
                     result.overwriteCount++
@@ -771,12 +1086,27 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         })
 
         setManyTx()
+        const tEnd = performance.now()
+
+        if (debug) {
+            debug.setDbExecTime(tEnd - tStart)
+            debug.finish()
+        }
         return result
     }
 
-    async deleteMany(filter: ITableFilter): Promise<ITableDeletedResult> {
-        const q = await mongoToSql(filter, { indexedFields: this.indexedFields, tableName: this.tableName } as any)
-        const isCompatible = isQuerySqlCompatible(filter)
+    async deleteMany(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
+
+        if (debug) {
+            const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
+            options!.debug!.dirtyReasons = analysis.reasons
+            options!.debug!.strategy = analysis.compatible ? "SQL" : "HYBRID"
+        }
+
+        const q = await mongoToSql(filter, { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any, this.dirtyFieldCache)
+        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
 
         let sql = ""
         let params = q.params
@@ -785,24 +1115,43 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             sql = `DELETE FROM "${this.tableName}" WHERE (${q.where})`
         } else {
             const sFilter = JSON.stringify(await serialize(filter))
-            sql = `DELETE FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)`
+            sql = `DELETE FROM "${this.tableName}" WHERE _id IN (
+                SELECT _id FROM "${this.tableName}" WHERE (${q.where}) AND JsMatch(data, _id, ?)
+             )`
             params = [...params, sFilter]
         }
 
+        if (debug) {
+            debug.setPrepareTime()
+            try {
+                const plan = this.getStatement(`EXPLAIN QUERY PLAN ${sql}`).all(...params)
+                options!.debug!.sqlPlan = plan as any
+            } catch (e) { }
+        }
+
+        const tStart = performance.now()
         const info = this.getStatement(sql).run(...params)
+        const tEnd = performance.now()
+
+        if (debug) {
+            debug.addSql(sql, params, tEnd - tStart)
+            debug.setDbExecTime(tEnd - tStart)
+            debug.finish()
+        }
         return { deletedCount: info.changes }
     }
 
     async deleteOne(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
-        const q = await mongoToSql(filter, { sort: options?.sort, indexedFields: this.indexedFields, tableName: this.tableName } as any)
-        q.limit = 1
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
 
-        const isCompatible = isQuerySqlCompatible(filter)
+        const q = await mongoToSql(filter, { ...options, limit: 1, indexedFields: this.indexedFields, tableName: this.tableName } as any, this.dirtyFieldCache)
+        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
 
         let selectSql = ""
         let params = q.params
 
-        // Query both _id and id to use correct DELETE target
+        // 查找要删除的 ID (从 deleteMany 的子查询逻辑借鉴，但改为 Fetch + Delete 模式以支持 Limit)
         if (isCompatible) {
             selectSql = `SELECT _id FROM "${this.tableName}" WHERE (${q.where})`
         } else {
@@ -812,16 +1161,35 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         }
 
         if (q.sort) selectSql += ` ORDER BY ${q.sort}`
-        selectSql += ` LIMIT 1`
+        selectSql += " LIMIT 1"
 
-        const row = this.getStatement(selectSql).get(...params)
+        if (debug) {
+            debug.setPrepareTime()
+            debug.addSql(selectSql, params)
+        }
+
+        const tStart = performance.now()
+        const row = this.getStatement(selectSql).get(...params) as { _id: number }
 
         if (row) {
-            this.getStatement(`DELETE FROM "${this.tableName}" WHERE _id = ?`).run((row as any)._id)
+            const delSql = `DELETE FROM "${this.tableName}" WHERE _id = ?`
+            this.getStatement(delSql).run(row._id)
+            if (debug) {
+                debug.addSql(delSql, [row._id])
+                debug.setDbExecTime(performance.now() - tStart)
+                debug.finish()
+            }
             return { deletedCount: 1 }
+        }
+
+        if (debug) {
+            debug.setDbExecTime(performance.now() - tStart)
+            debug.finish()
         }
         return { deletedCount: 0 }
     }
+
+    // --- Index Management ---
 
     async defineIndexes(indexes: ITableIndexConfig[], options?: ITableDefineIndexesOptions): Promise<void> {
         if (options?.rebuild) {
@@ -837,7 +1205,6 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
             if (idx.disabled) {
                 this.getStatement(`DROP INDEX IF EXISTS "${name}"`).run()
-                // 更新 indexedFields
                 const keys = typeof idx.key === "string" ? { [idx.key]: 1 } : idx.key
                 for (const k in keys) {
                     this.indexedFields.delete(k)
@@ -858,8 +1225,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
             this.getStatement(sql).run()
 
-            // Side Table Optimization (Inverted Index)
-            // Only for single-key indexes to avoid complexity
+            // 如果是单字段索引，自动创建侧表以支持数组查询加速
             if (Object.keys(keys).length === 1) {
                 const field = Object.keys(keys)[0]
                 this.createSideTableIndex(field)
@@ -868,16 +1234,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     private getSideTableName(field: string): string {
-        // Sanitize field to be safe in table name
         const safeField = field.replace(/[^a-zA-Z0-9_]/g, "_")
         return `_idx_${this.tableName}_${safeField}`
     }
 
     private async createSideTableIndex(field: string) {
-        // 1. 创建 Side Table
-        // _idx_{tableName}_{field}
-        // key: value, id
-        // 使用标准表允许在 (val, id) 中存储 NULL（WITHOUT ROWID 不允许主键为 NULL）
         const safeField = field.replace(/"/g, '""')
         const sideTableName = this.getSideTableName(field)
 
@@ -889,41 +1250,27 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             )`
         ).run()
 
-        // 2. 创建触发器 (自动同步)
-
-        // 辅助 SQL 片段
-        const extractArr = `SELECT DISTINCT value, NEW.id FROM json_each(NEW.data, '$.${safeField}') WHERE json_type(NEW.data, '$.${safeField}') = 'array'`
-        const extractScalar = `SELECT json_extract(NEW.data, '$.${safeField}'), NEW.id WHERE json_type(NEW.data, '$.${safeField}') IS NOT 'array' AND json_type(NEW.data, '$.${safeField}') IS NOT 'object' AND json_extract(NEW.data, '$.${safeField}') IS NOT NULL`
-        // 注意：我们排除了 Object。是否也应该排除 NULL？
-        // 等等，失败的测试插入了 NULL。Mongo 会索引 NULL。所以我们应该索引 NULL？
-        // 但是如果 key 缺失 json_extract 返回 NULL？
-        //  - 如果 key 缺失: json_type 为 null。json_extract 为 null。
-        //  - 如果 key 存在且值为 null: json_type 为 'null'。json_extract 为 null。
-        // 我们只想索引 "显式 Null"？
-        // Mongo: {a:1} -> 索引条目? 否。 {a:null} -> 索引条目 'null'。
-        // json_extract(data, '$.field') 对于 "缺失" 和 "null 值" 都返回 NULL。
-        // 使用 json_type 来区分？
-        // json_type(..., '$.field') 如果显式为 null 则返回 'null'。如果缺失则返回 NULL。
-
-        const extractScalarAndNull = `
+        const extractArr = `
+            SELECT DISTINCT value, NEW.id 
+            FROM json_each(NEW.data, '$.${safeField}') 
+            WHERE json_type(NEW.data, '$.${safeField}') = 'array'
+        `
+        const extractScalarAndObject = `
             SELECT json_extract(NEW.data, '$.${safeField}'), NEW.id 
-            WHERE json_type(NEW.data, '$.${safeField}') IS NOT 'array' 
-              AND json_type(NEW.data, '$.${safeField}') IS NOT 'object'
+            WHERE json_type(NEW.data, '$.${safeField}') IS NOT 'array'
               AND json_type(NEW.data, '$.${safeField}') IS NOT NULL
         `
 
-        // INSERT
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_insert" AFTER INSERT ON "${this.tableName}"
             BEGIN
                 INSERT INTO "${sideTableName}" (val, id)
                 ${extractArr}
                 UNION
-                ${extractScalarAndNull};
+                ${extractScalarAndObject};
             END;`
         ).run()
 
-        // DELETE
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_delete" AFTER DELETE ON "${this.tableName}"
             BEGIN
@@ -931,7 +1278,6 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             END;`
         ).run()
 
-        // UPDATE
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_update" AFTER UPDATE ON "${this.tableName}"
             BEGIN
@@ -939,18 +1285,20 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 INSERT INTO "${sideTableName}" (val, id)
                 ${extractArr}
                 UNION
-                ${extractScalarAndNull};
+                ${extractScalarAndObject};
             END;`
         ).run()
 
-        // 3. 回填数据
-        // 为了简化，直接循环或使用复杂 SQL。
-        // 因为这是一次性操作，我们可以使用类似的 UNION 逻辑。
-        const backfillArr = `SELECT DISTINCT json_each.value, "${this.tableName}".id FROM "${this.tableName}", json_each("${this.tableName}".data, '$.${safeField}') WHERE json_type("${this.tableName}".data, '$.${safeField}') = 'array'`
-        const backfillScalar = `
-            SELECT json_extract(data, '$.${safeField}'), id FROM "${this.tableName}"
+        // 初始化回填
+        const backfillArr = `
+            SELECT DISTINCT json_each.value, "${this.tableName}".id 
+            FROM "${this.tableName}", json_each("${this.tableName}".data, '$.${safeField}') 
+            WHERE json_type("${this.tableName}".data, '$.${safeField}') = 'array'
+        `
+        const backfillScalarAndObject = `
+            SELECT json_extract(data, '$.${safeField}'), id 
+            FROM "${this.tableName}"
             WHERE json_type(data, '$.${safeField}') IS NOT 'array'
-              AND json_type(data, '$.${safeField}') IS NOT 'object'
               AND json_type(data, '$.${safeField}') IS NOT NULL
         `
 
@@ -958,7 +1306,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             `INSERT OR IGNORE INTO "${sideTableName}" (val, id)
             ${backfillArr}
             UNION
-            ${backfillScalar}`
+            ${backfillScalarAndObject}`
         ).run()
 
         this.indexedFields.add(field)
@@ -966,19 +1314,12 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
     private dropSideTableIndex(field: string) {
         const sideTableName = this.getSideTableName(field)
-        // Dropping table automatically drops triggers associated with it? 
-        // No, triggers are on Main Table. Must drop explicitly.
-
         this.getStatement(`DROP TRIGGER IF EXISTS "t_${sideTableName}_insert"`).run()
         this.getStatement(`DROP TRIGGER IF EXISTS "t_${sideTableName}_delete"`).run()
         this.getStatement(`DROP TRIGGER IF EXISTS "t_${sideTableName}_update"`).run()
         this.getStatement(`DROP TABLE IF EXISTS "${sideTableName}"`).run()
     }
 
-    /**
-     * 临时禁用所有侧表触发器
-     * 用于批量导入时提升性能
-     */
     async disableSideTableTriggers(): Promise<void> {
         for (const field of this.indexedFields) {
             const sideTableName = this.getSideTableName(field)
@@ -988,20 +1329,12 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         }
     }
 
-    /**
-     * 重新启用所有侧表触发器
-     * 在批量导入完成后调用
-     */
     async enableSideTableTriggers(): Promise<void> {
         for (const field of this.indexedFields) {
             this.createSideTableTriggersOnly(field)
         }
     }
 
-    /**
-     * 仅创建触发器（不回填数据）
-     * 用于 enableSideTableTriggers
-     */
     private createSideTableTriggersOnly(field: string) {
         const safeField = field.replace(/"/g, '""')
         const sideTableName = this.getSideTableName(field)
@@ -1009,12 +1342,10 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const extractArr = `SELECT DISTINCT value, NEW.id FROM json_each(NEW.data, '$.${safeField}') WHERE json_type(NEW.data, '$.${safeField}') = 'array'`
         const extractScalarAndNull = `
             SELECT json_extract(NEW.data, '$.${safeField}'), NEW.id 
-            WHERE json_type(NEW.data, '$.${safeField}') IS NOT 'array' 
-              AND json_type(NEW.data, '$.${safeField}') IS NOT 'object'
+            WHERE json_type(NEW.data, '$.${safeField}') IS NOT 'array'
               AND json_type(NEW.data, '$.${safeField}') IS NOT NULL
         `
 
-        // INSERT
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_insert" AFTER INSERT ON "${this.tableName}"
             BEGIN
@@ -1025,7 +1356,6 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             END;`
         ).run()
 
-        // DELETE
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_delete" AFTER DELETE ON "${this.tableName}"
             BEGIN
@@ -1033,7 +1363,6 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             END;`
         ).run()
 
-        // UPDATE
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_update" AFTER UPDATE ON "${this.tableName}"
             BEGIN
@@ -1046,24 +1375,17 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         ).run()
     }
 
-    /**
-     * 重建所有侧表索引数据
-     * 清空侧表并从主表回填数据
-     */
     async rebuildSideTableIndexes(): Promise<void> {
         for (const field of this.indexedFields) {
             const safeField = field.replace(/"/g, '""')
             const sideTableName = this.getSideTableName(field)
 
-            // 清空侧表
             this.getStatement(`DELETE FROM "${sideTableName}"`).run()
 
-            // 回填数据
             const backfillArr = `SELECT DISTINCT json_each.value, "${this.tableName}".id FROM "${this.tableName}", json_each("${this.tableName}".data, '$.${safeField}') WHERE json_type("${this.tableName}".data, '$.${safeField}') = 'array'`
             const backfillScalar = `
                 SELECT json_extract(data, '$.${safeField}'), id FROM "${this.tableName}"
                 WHERE json_type(data, '$.${safeField}') IS NOT 'array'
-                  AND json_type(data, '$.${safeField}') IS NOT 'object'
                   AND json_type(data, '$.${safeField}') IS NOT NULL
             `
 
@@ -1088,7 +1410,6 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 this.getStatement(`DROP INDEX "${idx.name}"`).run()
             }
 
-            // Drop Side Tables
             for (const field of this.indexedFields) {
                 this.dropSideTableIndex(field)
             }
@@ -1102,179 +1423,36 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 }
 
-function isQuerySqlCompatible(filter: ITableFilter): boolean {
-    if (!filter) return true
-
-    for (const key in filter) {
-        if (key === "$and" || key === "$or") {
-            const subs = (filter as any)[key]
-            if (Array.isArray(subs)) {
-                for (const sub of subs) {
-                    if (!isQuerySqlCompatible(sub)) return false
-                }
-            }
-            continue
-        }
-
-        // Unsupported logic
-        if (key === "$nor" || key === "$not" || key === "$where") return false
-
-        // 检查是否是数组索引路径（如 "tags.0" 或 "items.0.x"）
-        // 以及数组元素属性路径（如 "items.x"，用于查询数组中对象的属性）
-        // 这些路径在 SQLite 的 json_extract 中需要特殊语法，使用 JsMatch 更可靠
-        if (key.includes('.')) {
-            // 简化检测：包含点号的路径统一使用 JsMatch 处理
-            // 因为可能是：1) 嵌套对象属性 2) 数组索引 3) 数组元素属性
-            // JsMatch 可以正确处理所有这些情况
-            return false
-        }
-
-        const val = (filter as any)[key]
-        if (val && typeof val === "object") {
-            // Check if it's an operator object
-            if (!Array.isArray(val)) {
-                // 检查是否所有键都以 $ 开头（操作符对象）
-                const keys = Object.keys(val)
-                const isOperator = keys.length > 0 && keys.every(k => k.startsWith("$"))
-                
-                if (isOperator) {
-                    for (const op in val) {
-                        // 范围比较操作符（$gt/$gte/$lt/$lte）不能安全使用纯 SQL
-                        // 因为数据库中可能存储了特殊数值（Infinity、NaN），它们被序列化为对象字符串
-                        // SQL 的字符串与数字比较会产生意外结果
-                        if (["$gt", "$gte", "$lt", "$lte"].includes(op)) {
-                            return false
-                        }
-                        // 其他支持的操作符
-                        if (["$eq", "$in"].includes(op)) {
-                            // Check operand compatibility
-                            const opVal = val[op]
-                            if (!isCompatibleValue(opVal)) return false
-                        } else {
-                            // Unsupported operator (e.g. $regex, $elemMatch, $size, $exists etc.)
-                            return false
-                        }
-                    }
-                } else {
-                    // 普通对象值（如 { ob: { a: 1, b: 2 } }），需要 JsMatch 处理
-                    return false
-                }
-            } else {
-                // Array value as direct equality check [1, 2] -> unsafe for SQL if we treated it as equality
-                // But mongoToSql treats it as equality? 
-                // isSafeForEquality in mongoToSql treats Array as TRUE.
-                // But we want to be conservative.
-                // If it is an array and not an operator, it probably implies strict array equality, 
-                // which mongoToSql handles via parameters.
-                // However, array equality in JSON extract logic is tricky. 
-                // Let's assume complex types like Array/Object are NOT fully trusted for SQL-only optimization to be safe.
-                return false
-            }
-        } else {
-            // 简单值查询（如 { field: 1 } 或 { id: "xxx" }）
-            // id 字段是唯一索引，可以安全使用 SQL
-            // 其他字段可能是数组，MongoDB 允许隐式数组包含检查，需要 JsMatch 处理
-            if (key === "id" || key === "_id") {
-                // id 字段可以安全使用 SQL
-                if (!isCompatibleValue(val)) return false
-            } else {
-                // 其他字段的简单值查询需要 JsMatch 处理数组语义
-                return false
-            }
-        }
-    }
-    return true
-}
-
-function isCompatibleValue(val: any): boolean {
-    // null/undefined 查询需要 JsMatch 处理，因为 MongoDB 的 null 查询也会匹配数组中包含 null 的文档
-    if (val === null || val === undefined) return false
-    const t = typeof val
-    if (t === 'number') {
-        // 特殊数值 Infinity、-Infinity、NaN 会被序列化为对象格式，无法直接用 SQL 比较
-        if (!Number.isFinite(val)) return false
-        return true
-    }
-    if (t === 'string' || t === 'boolean') return true
-    if (t === 'bigint') return false // serializes to object, unsafe for SQL range comparison
-
-    // Date, Buffer, etc might rely on specific serialization that matches?
-    // Dates are stored as ISO strings. SQL comparison of ISO strings works for > < etc.
-    if (val instanceof Date) return true
-
-    return false
-}
-
 /**
- * 将数组分割成指定大小的块
+ * Debug 收集器
+ * 负责收集 SQL 执行信息、时间统计和查询计划
  */
-function chunkArray<T>(arr: T[], size: number): T[][] {
-    const chunks: T[][] = []
-    for (let i = 0; i < arr.length; i += size) {
-        chunks.push(arr.slice(i, i + size))
-    }
-    return chunks
-}
+class DebugCollector {
+    startTime: number
+    result: any
 
-/**
- * 简单的内存 Projection 实现
- */
-function project(doc: any, projection: any): any {
-    if (!projection || Object.keys(projection).length === 0) return doc
-
-    // 规范化投影 (数组转对象)
-    const proj: any = {}
-    if (Array.isArray(projection)) {
-        for (const key of projection) proj[key] = 1
-    } else {
-        Object.assign(proj, projection)
+    constructor(result: any) {
+        this.result = result
+        this.startTime = performance.now()
+        this.result.sql = this.result.sql || []
+        this.result.dirtyReasons = this.result.dirtyReasons || []
     }
 
-    const result: any = {}
-    const keys = Object.keys(proj)
-    // 检查是包含模式还是排除模式 (不允许混合，除了 _id，但这里简化处理)
-    // 如果任何值为 1/true，则为包含模式 (其余被抑制)。
-    // 如果全为 0/false，则为排除模式 (其余保留)。
-
-    // 简化：Mongo 默认包含 _id。
-    // 如果用户指定 { a: 1 }，则只包含 a 和 id。
-    // 如果用户指定 { a: 0 }，则排除 a，其余包含。
-
-    // 检测模式
-    let isInclusion = false
-    for (const k in proj) {
-        if (proj[k] === 1 || proj[k] === true) {
-            isInclusion = true
-            break
+    setPrepareTime() {
+        if (!this.result.prepareTimeMs) {
+            this.result.prepareTimeMs = performance.now() - this.startTime
         }
     }
 
-    if (isInclusion) {
-        // 包含模式 (Inclusion Mode)
-        // 除非明确排除，否则始终包含 ID (Mongo 行为)
-        if (doc.id !== undefined && (proj.id === 1 || proj.id === true)) {
-            result.id = doc.id
-        }
-
-        if (doc._id !== undefined && (proj._id === 1 || proj._id === true)) {
-            result._id = doc._id
-        }
-
-        for (const key in proj) {
-            if (proj[key] === 1 || proj[key] === true) {
-                if (key === "id" || key === "_id") continue
-                // 此处未完全支持嵌套投影，仅顶层
-                if (doc[key] !== undefined) result[key] = doc[key]
-            }
-        }
-    } else {
-        // 排除模式 (Exclusion Mode)
-        Object.assign(result, doc)
-        for (const key in proj) {
-            if (proj[key] === 0 || proj[key] === false) {
-                delete result[key]
-            }
-        }
+    addSql(query: string, params: any[], execTime?: number) {
+        this.result.sql!.push({ query, params, executionTimeMs: execTime })
     }
-    return result
+
+    setDbExecTime(time: number) {
+        this.result.dbExecTimeMs = (this.result.dbExecTimeMs || 0) + time
+    }
+
+    finish() {
+        this.result.totalTimeMs = performance.now() - this.startTime
+    }
 }
