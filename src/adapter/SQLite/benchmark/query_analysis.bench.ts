@@ -226,11 +226,17 @@ async function main() {
     console.log(`正在运行基准测试 (每项运行 ${ITERATIONS} 次取平均)...\n`)
 
     // ==================== 精确匹配 ====================
-    await benchmark("精确匹配", "有索引 (type_idx)",
+    await benchmark("精确匹配", "string 有索引 (type_idx)",
         d => table.findMany({ type_idx: "A" }, { limit: 1, debug: d }))
 
-    await benchmark("精确匹配", "无索引 (type_noidx)",
+    await benchmark("精确匹配", "string 无索引 (type_noidx)",
         d => table.findMany({ type_noidx: "A" }, { limit: 1, debug: d }))
+
+    await benchmark("精确匹配", "number 有索引 (val_idx)",
+        d => table.findMany({ val_idx: 42 }, { limit: 1, debug: d }))
+
+    await benchmark("精确匹配", "number 无索引 (val_noidx)",
+        d => table.findMany({ val_noidx: 42 }, { limit: 1, debug: d }))
 
     await benchmark("精确匹配", "点号路径-有索引 (nested_idx.info)",
         d => table.findMany({ "nested_idx.info": "info_25000" }, { debug: d }))
