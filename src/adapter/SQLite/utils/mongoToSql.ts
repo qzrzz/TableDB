@@ -1,4 +1,3 @@
-
 import { ITableFilter } from "../../../core/types"
 import { ITableFindOptions } from "../../adapter"
 import { serialize } from "./serializer"
@@ -93,7 +92,6 @@ export async function mongoToSql(filter: ITableFilter, options?: ITableFindOptio
         }
     }
 
-
     // ... helper logic ...
 
     return {
@@ -155,6 +153,24 @@ async function parseFieldCondition(
     indexedFields?: Set<string>,
     tableName?: string
 ) {
+    // 检查是否是纯数字索引路径（如 "tags.2" 或 "items.0.name"）
+    // 这种路径 SQLite 可以正确处理
+    const pathParts = path.split(".")
+    const isNumericIndexPath = pathParts.every((part, idx) => {
+        // 第一部分是字段名，后续部分可以是数字索引或属性名
+        if (idx === 0) return true
+        // 后续部分如果是数字，则是数组索引
+        return /^\d+$/.test(part)
+    })
+
+    // 包含点号的路径，但不是纯数字索引路径，可能涉及数组展开
+    // 例如 "items.x" 查询数组元素属性，SQLite 的 json_extract 不支持
+    // 使用 1=1 让 JsMatch 处理
+    if (path.includes(".") && !isNumericIndexPath && path !== "id" && path !== "_id") {
+        conditions.push("1=1")
+        return
+    }
+
     let colExpr = ""
     if (path === "id") {
         colExpr = "id"
@@ -163,29 +179,46 @@ async function parseFieldCondition(
         // _id 是整数主键，确保值为整数类型
         value = ensureIntegerId(value)
     } else {
-        colExpr = `json_extract(data, '$.${path}')`
+        // 将点号路径转换为 SQLite JSON 路径格式
+        // 例如 "tags.2" -> "$.tags[2]", "items.0.name" -> "$.items[0].name"
+        const jsonPath = pathParts
+            .map((part, idx) => {
+                if (idx === 0) return `$.${part}`
+                if (/^\d+$/.test(part)) return `[${part}]`
+                return `.${part}`
+            })
+            .join("")
+        colExpr = `json_extract(data, '${jsonPath}')`
     }
 
     if (!isOperatorObject(value)) {
         // 简单值查询（相当于 $eq）
         if (value === null || value === undefined) {
-            // MongoDB 行为：{ field: null } 同时匹配 null 和缺失字段
-            conditions.push(`(${colExpr} IS NULL OR ${colExpr} = json('null'))`)
+            // MongoDB 行为：{ field: null } 同时匹配：
+
+            // 1. 字段值为 null
+            // 2. 字段不存在
+            // 3. 数组字段中包含 null
+            // SQL 无法处理第 3 种情况，使用 1=1 让 JsMatch 处理
+            conditions.push("1=1")
         } else if (isSafeForEquality(value)) {
-            await addCondition(colExpr, "=", value, conditions, params, indexedFields, tableName)
+            // MongoDB 允许简单值查询匹配数组字段（隐式 $in）
+            // 例如 { tags: "red" } 可以匹配 tags: ["red", "blue"]
+            // 由于 SQL 无法精确表达这种语义，使用 1=1 让 JsMatch 处理
+            conditions.push("1=1")
         } else {
-            // SQL 比较的不安全类型
-            conditions.push("1=0")
+            // SQL 比较的不安全类型（如普通对象），使用 1=1 让 JsMatch 处理
+            conditions.push("1=1")
         }
     } else {
         for (const op in value) {
             const opVal = value[op]
             switch (op) {
                 case "$eq":
-                    // MongoDB 行为：$eq null 匹配 null 和缺失字段
+                    // MongoDB 行为：$eq null 匹配 null、缺失字段和数组包含 null
+                    // SQL 无法处理数组包含 null 的情况，使用 1=1 让 JsMatch 处理
                     if (opVal === null || opVal === undefined) {
-                        // 使用 IS NULL 来匹配 null 值和缺失字段
-                        conditions.push(`(${colExpr} IS NULL OR ${colExpr} = json('null'))`)
+                        conditions.push("1=1")
                     } else if (isSafeForEquality(opVal)) {
                         await addCondition(colExpr, "=", opVal, conditions, params, indexedFields, tableName)
                     }
@@ -217,39 +250,61 @@ async function parseFieldCondition(
                     break
                 case "$in":
                     if (Array.isArray(opVal) && opVal.length > 0) {
-                        // 必须所有元素都支持安全相等性检查才能使用 SQL IN
-                        if (opVal.every(isSafeForEquality)) {
-                            const marks = opVal.map(() => "?").join(",")
+                        // 检查是否包含 null
+                        const hasNull = opVal.some((v) => v === null || v === undefined)
+                        const nonNullValues = opVal.filter((v) => v !== null && v !== undefined)
 
-                            // 智能优化：倒排索引 (Side Table) 检查
-                            let optimized = false
-                            if (tableName && indexedFields) {
-                                const match = colExpr.match(/^json_extract\(data, '(\$\..+)'\)$/)
-                                if (match) {
-                                    const path = match[1]
-                                    const fieldName = path.replace(/^\$\./, "")
-                                    if (indexedFields.has(fieldName)) {
-                                        const safeField = fieldName.replace(/[^a-zA-Z0-9_]/g, "_")
-                                        const sideTableName = `_idx_${tableName}_${safeField}`
-                                        conditions.push(`EXISTS (SELECT 1 FROM "${sideTableName}" WHERE id = "${tableName}".id AND val IN (${marks}))`)
-                                        optimized = true
+                        // 必须所有非 null 元素都支持安全相等性检查才能使用 SQL IN
+                        if (nonNullValues.every(isSafeForEquality)) {
+                            const inConditions: string[] = []
+
+                            // 处理 null 值 - MongoDB 行为：$in [null] 匹配 null 和缺失字段
+                            if (hasNull) {
+                                inConditions.push(`(${colExpr} IS NULL OR ${colExpr} = json('null'))`)
+                            }
+
+                            // 处理非 null 值
+                            if (nonNullValues.length > 0) {
+                                const marks = nonNullValues.map(() => "?").join(",")
+
+                                // 智能优化：倒排索引 (Side Table) 检查
+                                let optimized = false
+                                if (tableName && indexedFields) {
+                                    const match = colExpr.match(/^json_extract\(data, '(\$\..+)'\)$/)
+                                    if (match) {
+                                        const path = match[1]
+                                        const fieldName = path.replace(/^\$\./, "")
+                                        if (indexedFields.has(fieldName)) {
+                                            const safeField = fieldName.replace(/[^a-zA-Z0-9_]/g, "_")
+                                            const sideTableName = `_idx_${tableName}_${safeField}`
+                                            inConditions.push(
+                                                `EXISTS (SELECT 1 FROM "${sideTableName}" WHERE id = "${tableName}".id AND val IN (${marks}))`
+                                            )
+                                            optimized = true
+                                        }
                                     }
+                                }
+
+                                if (!optimized) {
+                                    inConditions.push(`${colExpr} IN (${marks})`)
+                                }
+
+                                for (let v of nonNullValues) {
+                                    if (colExpr === "id" && typeof v === "number") v = String(v)
+                                    const [sVal] = await prepareValue(v)
+                                    params.push(sVal)
                                 }
                             }
 
-                            if (!optimized) {
-                                conditions.push(`${colExpr} IN (${marks})`)
-                            }
-
-                            for (let v of opVal) {
-                                if (colExpr === "id" && typeof v === "number") v = String(v)
-                                const [sVal] = await prepareValue(v)
-                                params.push(sVal)
+                            // 组合所有条件
+                            if (inConditions.length > 0) {
+                                conditions.push(`(${inConditions.join(" OR ")})`)
                             }
                         } else {
                             // 如果不安全，则无法高效或正确地使用 SQL IN
                             // BigInt/Buffer 的相等性是安全的，所以这里主要跳过对象
                             // 如果跳过，由 JsMatch 处理。
+                            conditions.push("1=1")
                         }
                     } else {
                         conditions.push("1=0")
@@ -257,17 +312,40 @@ async function parseFieldCondition(
                     break
                 case "$nin":
                     if (Array.isArray(opVal) && opVal.length > 0) {
-                        if (opVal.every(isSafeForEquality)) {
-                            const marks = opVal.map(() => "?").join(",")
-                            const cond = `(${colExpr} NOT IN (${marks}) OR ${colExpr} IS NULL)`
-                            conditions.push(cond)
-                            for (let v of opVal) {
-                                if (colExpr === "id" && typeof v === "number") v = String(v)
-                                const [sVal] = await prepareValue(v)
-                                params.push(sVal)
+                        // 检查是否包含 null
+                        const hasNull = opVal.some((v) => v === null || v === undefined)
+                        const nonNullValues = opVal.filter((v) => v !== null && v !== undefined)
+
+                        if (nonNullValues.every(isSafeForEquality)) {
+                            const ninConditions: string[] = []
+
+                            // MongoDB 行为：$nin [null] 排除 null 和缺失字段
+                            if (hasNull) {
+                                // 字段必须存在且不为 null
+                                ninConditions.push(`(${colExpr} IS NOT NULL AND ${colExpr} != json('null'))`)
                             }
+
+                            // 处理非 null 值
+                            if (nonNullValues.length > 0) {
+                                const marks = nonNullValues.map(() => "?").join(",")
+                                ninConditions.push(`${colExpr} NOT IN (${marks})`)
+                                for (let v of nonNullValues) {
+                                    if (colExpr === "id" && typeof v === "number") v = String(v)
+                                    const [sVal] = await prepareValue(v)
+                                    params.push(sVal)
+                                }
+                            }
+
+                            // 组合条件：所有条件都必须满足（AND）
+                            if (ninConditions.length > 0) {
+                                conditions.push(`(${ninConditions.join(" AND ")})`)
+                            }
+                        } else {
+                            // 不安全类型，由 JsMatch 处理
+                            conditions.push("1=1")
                         }
                     }
+                    // $nin: [] 匹配所有 - 不添加任何条件
                     break
             }
         }
@@ -307,9 +385,10 @@ async function addCondition(
             const match = col.match(/^json_extract\(data, '(\$\..+)'\)$/)
             if (match) {
                 const path = match[1]
-                const typeCheck = typeof val === 'boolean'
-                    ? `json_type(data, '${path}') = '${val ? 'true' : 'false'}'`
-                    : typeof val === 'number'
+                const typeCheck =
+                    typeof val === "boolean"
+                        ? `json_type(data, '${path}') = '${val ? "true" : "false"}'`
+                        : typeof val === "number"
                         ? `json_type(data, '${path}') IN ('integer', 'real')`
                         : "1=1"
 
@@ -359,7 +438,12 @@ async function addCondition(
 function isSafeForRange(val: any): boolean {
     if (val === null || val === undefined) return true
     const t = typeof val
-    if (t === 'number' || t === 'string' || t === 'boolean') return true
+    if (t === "number") {
+        // 特殊数值 Infinity、-Infinity、NaN 会被序列化为对象格式，无法直接用 SQL 比较
+        if (!Number.isFinite(val)) return false
+        return true
+    }
+    if (t === "string" || t === "boolean") return true
     if (val instanceof Date) return true
     return false
 }
@@ -367,17 +451,19 @@ function isSafeForRange(val: any): boolean {
 function isSafeForEquality(val: any): boolean {
     if (val === null || val === undefined) return true
     const t = typeof val
-    if (t === 'number' || t === 'string' || t === 'boolean') return true
-    if (t === 'bigint') return true
+    if (t === "number" || t === "string" || t === "boolean") return true
+    if (t === "bigint") return true
     if (val instanceof Date) return true
 
     // 数组具有稳定的序列化顺序 [1,2] -> "[1,2]"
     if (Array.isArray(val)) return true
 
     // Buffer 具有稳定的包装结构
-    if ((typeof Buffer !== 'undefined' && Buffer.isBuffer(val)) ||
+    if (
+        (typeof Buffer !== "undefined" && Buffer.isBuffer(val)) ||
         val instanceof ArrayBuffer ||
-        (ArrayBuffer.isView(val) && !(val instanceof DataView))) {
+        (ArrayBuffer.isView(val) && !(val instanceof DataView))
+    ) {
         return true
     }
 
@@ -385,11 +471,10 @@ function isSafeForEquality(val: any): boolean {
     // 但 Map 和 Set 具有稳定的序列化 (如果检查相同插入顺序的精确匹配)
     if (val instanceof Map || val instanceof Set) return true
 
-    if (t === 'object') return false
+    if (t === "object") return false
 
     return false
 }
-
 
 /**
  * 准备参数值

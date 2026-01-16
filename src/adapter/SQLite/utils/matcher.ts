@@ -3,6 +3,70 @@ import { get, isEqual as lodashIsEqual, isPlainObject } from "es-toolkit/compat"
 import { ITableFilter } from "../../../core/types"
 
 /**
+ * MongoDB 风格的点号路径取值
+ * 支持在数组路径上进行隐式展开
+ * 例如: getMongoPath({ items: [{ x: 1 }, { x: 2 }] }, "items.x") => [1, 2]
+ * 
+ * @param doc 文档对象
+ * @param path 点号分隔的路径
+ * @returns 取到的值，如果路径经过数组则返回所有匹配值的数组
+ */
+function getMongoPath(doc: any, path: string): any {
+    const parts = path.split(".")
+    let current: any = doc
+    
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i]
+        
+        if (current === null || current === undefined) {
+            return undefined
+        }
+        
+        // 数字索引（如 "tags.0"）- 直接访问数组元素
+        if (/^\d+$/.test(part)) {
+            const idx = parseInt(part, 10)
+            if (Array.isArray(current)) {
+                current = current[idx]
+            } else if (typeof current === "object" && current !== null) {
+                current = current[part]
+            } else {
+                return undefined
+            }
+            continue
+        }
+        
+        if (Array.isArray(current)) {
+            // 数组展开：对数组中每个元素继续访问剩余路径（非数字索引）
+            const remainingPath = parts.slice(i).join(".")
+            const results: any[] = []
+            for (const item of current) {
+                const val = getMongoPath(item, remainingPath)
+                if (val !== undefined) {
+                    if (Array.isArray(val) && (val as any)._isMultiValue) {
+                        results.push(...val)
+                    } else {
+                        results.push(val)
+                    }
+                }
+            }
+            // 标记这个数组是通过展开产生的
+            const arr = results as any
+            arr._isMultiValue = true
+            return arr
+        }
+        
+        // 普通属性访问
+        if (typeof current === "object" && current !== null) {
+            current = current[part]
+        } else {
+            return undefined
+        }
+    }
+    
+    return current
+}
+
+/**
  * 判断文档是否匹配 Filter
  * 用于 SQLite 自定义函数 JsMatch
  * 
@@ -25,7 +89,8 @@ export function matches(doc: any, filter: ITableFilter): boolean {
         } else {
             // Field query
             const condition = (filter as any)[key]
-            const value = get(doc, key)
+            // 使用 MongoDB 风格的路径取值（支持数组展开）
+            const value = key.includes('.') ? getMongoPath(doc, key) : get(doc, key)
             if (!matchValue(value, condition)) return false
         }
     }
@@ -61,8 +126,24 @@ function matchValue(value: any, condition: any): boolean {
             }
             return value === null || value === undefined
         }
-        // Special handling for array field matching scalar
-        if (Array.isArray(value) && !Array.isArray(condition)) {
+        // Special handling for array field matching
+        if (Array.isArray(value)) {
+            // 如果 condition 也是数组
+            if (Array.isArray(condition)) {
+                // 特殊情况：空数组查询应该精确匹配空数组
+                // 例如 { arr: [] } 应该匹配 arr: []，但不匹配 arr: [[]]
+                if (condition.length === 0) {
+                    return safeIsEqual(value, condition)
+                }
+                // MongoDB 行为：非空数组查询同时检查两种情况：
+                // 1. 精确相等：value 整体等于 condition
+                // 2. 包含元素：value 中有任何元素等于 condition
+                // 例如 { matrix: [[1, 2], [3, 4]] } 应匹配:
+                //   - matrix: [[1, 2], [3, 4]]  （精确相等）
+                //   - matrix: [[[1, 2], [3, 4]], [5, 6]]  （包含元素）
+                return safeIsEqual(value, condition) || value.some(v => safeIsEqual(v, condition))
+            }
+            // condition 是标量，检查数组中是否包含该值
             return value.some(v => safeIsEqual(v, condition))
         }
         return safeIsEqual(value, condition)
@@ -75,6 +156,10 @@ function matchValue(value: any, condition: any): boolean {
 
     if (!isOperator) {
         // It's a nested object match or exact object match
+        // MongoDB 行为：如果 value 是数组，检查数组中是否有任何元素与 condition 匹配
+        if (Array.isArray(value)) {
+            return value.some(v => safeIsEqual(v, condition))
+        }
         return safeIsEqual(value, condition)
     }
 
@@ -160,6 +245,8 @@ function evaluateOp(value: any, op: string, opVal: any): boolean {
             return matchValue(value.length, opVal)
         case "$all":
             if (!Array.isArray(value) || !Array.isArray(opVal)) return false
+            // MongoDB 行为：$all: [] 返回 0 条记录（认为是无效查询）
+            if (opVal.length === 0) return false
             return opVal.every(req => value.some(v => safeIsEqual(v, req)))
         case "$not":
             // $not performs a logical NOT operation on the specified operator expression
@@ -169,6 +256,10 @@ function evaluateOp(value: any, op: string, opVal: any): boolean {
 }
 
 function compareOp(op: string, a: any, b: any): boolean {
+    // MongoDB 行为：null 和 undefined 不参与比较，返回 false
+    if (a === null || a === undefined) return false
+    if (b === null || b === undefined) return false
+    
     const res = compare(a, b)
     if (op === "$gt") return res > 0
     if (op === "$gte") return res >= 0

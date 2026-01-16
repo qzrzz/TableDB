@@ -1,6 +1,30 @@
 
 
 /**
+ * 检测 JSON 字符串是否包含特殊类型标记
+ * 用于快速判断是否需要完整的反序列化流程
+ * @param json JSON 字符串
+ * @returns 如果包含特殊类型标记（如 "$t"）返回 true，否则返回 false
+ */
+export function needsSpecialDeserialization(json: string): boolean {
+    // 快速检测是否包含序列化标记 "$t"
+    // 这比完整解析 JSON 再检查要快得多
+    return json.includes('"$t"')
+}
+
+/**
+ * 快速反序列化
+ * 如果 JSON 不包含特殊类型，直接使用 JSON.parse
+ * 否则使用完整的 deserialize 流程
+ */
+export function fastDeserialize(json: string): any {
+    if (!needsSpecialDeserialization(json)) {
+        return JSON.parse(json)
+    }
+    return deserialize(JSON.parse(json))
+}
+
+/**
  * 将 JS 对象序列化为 SQLite 可存储的 JSON 友好格式
  * 异步版本：支持 Blob 转 Base64
  */
@@ -64,6 +88,21 @@ export async function serialize(value: any): Promise<any> {
  */
 export function serializeSync(value: any): any {
     if (value === null || value === undefined) return value
+
+    // 处理特殊数值：Infinity、-Infinity、NaN（JSON.stringify 会将它们转为 null）
+    if (typeof value === "number") {
+        if (Number.isNaN(value)) {
+            return { $t: "nan" }
+        }
+        if (value === Infinity) {
+            return { $t: "inf" }
+        }
+        if (value === -Infinity) {
+            return { $t: "-inf" }
+        }
+        // 普通数字直接返回
+        return value
+    }
 
     if (typeof value === "bigint") {
         return { $t: "n", v: value.toString() }
@@ -142,6 +181,12 @@ export function deserialize(value: any): any {
                     return new Date(value["v"])
                 case "r":
                     return new RegExp(value["s"], value["f"])
+                case "nan":
+                    return NaN
+                case "inf":
+                    return Infinity
+                case "-inf":
+                    return -Infinity
                 case "m":
                     // Restore Map
                     return new Map(value["v"].map(([k, v]: [any, any]) => [deserialize(k), deserialize(v)]))

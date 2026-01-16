@@ -19,8 +19,7 @@ You are an expert in JavaScript, Rspack, Rsbuild, Rslib, and library development
 
 ## Docs
 
+- `TableDB` : ./readme-cn.md
 - Rslib: https://rslib.rs/llms.txt
-- Rsbuild: https://rsbuild.rs/llms.txt
-- Rspack: https://rspack.rs/llms.txt
-
+ 
 
