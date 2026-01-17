@@ -1,6 +1,6 @@
 # TableDB
 
-一个非常简单的 NoSQL 数据库抽象层，提供类似 MongoDB 的增删改查 API，支持多种存储后端（SQLite, MongoDB）。
+一个非常简单的 NoSQL 数据库抽象层，提供类似 MongoDB 的增删改查 API，但是支持多种数据库，可以在 SQLite, MongoDB 之间切换。
 
 -   对 JavaScript 内置数据类型完全支持，可以把 `Date`, `Map`, `RegExp`,`ArrayBuffer`, `Blob` 等类型直接存入 TableDB，再出取出后数据类型不变。
 -   类似 MongoDB 的查询和更新语法，并且提供“分页”、“游标分页”、“批量遍历”等实用功能。
