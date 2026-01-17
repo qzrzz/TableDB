@@ -209,13 +209,52 @@ async function parseFieldCondition(
         // 简单值查询（相当于 $eq）
         if (value === null || value === undefined) {
             // MongoDB 行为：{ field: null } 同时匹配：
-
             // 1. 字段值为 null
             // 2. 字段不存在
             // 3. 数组字段中包含 null
-            // SQL 无法处理第 3 种情况，使用 1=1 让 JsMatch 处理
-            conditions.push("1=1")
+            // 
+            // 使用纯 SQL 实现以获得更好的性能
+            if (path === "id" || path === "_id") {
+                // id/_id 字段是标量，不可能是数组
+                conditions.push(`${colExpr} IS NULL`)
+            } else {
+                // 将点号路径转换为 JSON 路径
+                const pathParts = path.split(".")
+                const jsonPath = pathParts
+                    .map((part, idx) => {
+                        if (idx === 0) return `$.${part}`
+                        if (/^\d+$/.test(part)) return `[${part}]`
+                        return `.${part}`
+                    })
+                    .join("")
+
+                // 利用 schemaStats 判断该字段是否曾存储过数组
+                // 如果没有，可以跳过数组检查，生成更简单的 SQL
+                const stats = schemaStats?.get(path)
+                const hasArrayType = stats?.hasArray ?? true  // 默认保守处理，假设可能有数组
+
+                if (hasArrayType) {
+                    // 字段可能是数组，需要检查数组包含 null 的情况
+                    const nullCondition = `(
+                        json_type(data, '${jsonPath}') IS NULL
+                        OR json_type(data, '${jsonPath}') = 'null'
+                        OR (json_type(data, '${jsonPath}') = 'array' AND EXISTS (
+                            SELECT 1 FROM json_each(data, '${jsonPath}') WHERE value IS NULL
+                        ))
+                    )`
+                    conditions.push(nullCondition)
+                } else {
+                    // 字段从未存储过数组，可以使用更简单的 SQL
+                    const nullCondition = `(
+                        json_type(data, '${jsonPath}') IS NULL
+                        OR json_type(data, '${jsonPath}') = 'null'
+                    )`
+                    conditions.push(nullCondition)
+                }
+            }
+
         } else if (isSafeForEquality(value)) {
+
             // MongoDB 允许简单值查询匹配数组字段（隐式 $in）
             // 例如 { tags: "red" } 可以匹配 tags: ["red", "blue"]
 
@@ -278,13 +317,45 @@ async function parseFieldCondition(
             switch (op) {
                 case "$eq":
                     // MongoDB 行为：$eq null 匹配 null、缺失字段和数组包含 null
-                    // SQL 无法处理数组包含 null 的情况，使用 1=1 让 JsMatch 处理
                     if (opVal === null || opVal === undefined) {
-                        conditions.push("1=1")
+                        // 将点号路径转换为 JSON 路径
+                        const pathParts = path.split(".")
+                        const jsonPath = pathParts
+                            .map((part, idx) => {
+                                if (idx === 0) return `$.${part}`
+                                if (/^\d+$/.test(part)) return `[${part}]`
+                                return `.${part}`
+                            })
+                            .join("")
+
+                        // 利用 schemaStats 判断该字段是否曾存储过数组
+                        const stats = schemaStats?.get(path)
+                        const hasArrayType = stats?.hasArray ?? true
+
+                        if (hasArrayType) {
+                            // 字段可能是数组，需要检查数组包含 null 的情况
+                            const nullCondition = `(
+                                json_type(data, '${jsonPath}') IS NULL
+                                OR json_type(data, '${jsonPath}') = 'null'
+                                OR (json_type(data, '${jsonPath}') = 'array' AND EXISTS (
+                                    SELECT 1 FROM json_each(data, '${jsonPath}') WHERE value IS NULL
+                                ))
+                            )`
+                            conditions.push(nullCondition)
+                        } else {
+                            // 字段从未存储过数组，使用更简单的 SQL
+                            const nullCondition = `(
+                                json_type(data, '${jsonPath}') IS NULL
+                                OR json_type(data, '${jsonPath}') = 'null'
+                            )`
+                            conditions.push(nullCondition)
+                        }
                     } else if (isSafeForEquality(opVal)) {
                         await addCondition(colExpr, "=", opVal, conditions, params, indexedFields, tableName)
                     }
                     break
+
+
                 case "$ne":
                     // MongoDB 行为：$ne null 只匹配字段存在且值不为 null 的文档
                     if (opVal === null || opVal === undefined) {
@@ -462,12 +533,24 @@ async function addCondition(
             const match = col.match(/^json_extract\(data, '(\$\..+)'\)$/)
             if (match) {
                 const path = match[1]
-                const typeCheck =
-                    typeof val === "boolean"
-                        ? `json_type(data, '${path}') = '${val ? "true" : "false"}'`
-                        : typeof val === "number"
-                            ? `json_type(data, '${path}') IN ('integer', 'real')`
-                            : "1=1"
+
+                // 生成类型检查条件
+                // 注意：NaN 和 Infinity 虽然 typeof 是 "number"，但序列化后是对象 { $t: "nan" } 等
+                let typeCheck: string
+                if (typeof val === "boolean") {
+                    typeCheck = `json_type(data, '${path}') = '${val ? "true" : "false"}'`
+                } else if (typeof val === "number") {
+                    if (Number.isNaN(val) || !Number.isFinite(val)) {
+                        // NaN/Infinity 序列化为对象 { $t: "nan" } 等
+                        typeCheck = `json_type(data, '${path}') = 'object'`
+                    } else {
+                        // 普通数值
+                        typeCheck = `json_type(data, '${path}') IN ('integer', 'real')`
+                    }
+                } else {
+                    typeCheck = "1=1"
+                }
+
 
                 // 智能优化：Inverted Index (Side Table)
                 const fieldName = path.replace(/^\$\./, "")

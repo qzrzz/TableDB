@@ -25,8 +25,9 @@ export function fastDeserialize(json: string): any {
 }
 
 /**
+ * 异步序列化版本
  * 将 JS 对象序列化为 SQLite 可存储的 JSON 友好格式
- * 异步版本：支持 Blob 转 Base64
+ * 支持 Blob 转 Base64
  */
 export async function serialize(value: any): Promise<any> {
     if (value === null || value === undefined) return value
@@ -83,7 +84,10 @@ export async function serialize(value: any): Promise<any> {
 }
 
 /**
- * 同步版本：不支持 Blob (除非 Blob逻辑是sync的，但通常不是)
+ * 同步序列化版本
+ * 减少异步调用的开销，提高性能 
+ * 将 JS 对象序列化为 SQLite 可存储的 JSON 友好格式
+ * 不支持 Blob，因为 Blob 需要异步读取文件内容
  * 用于 JsPatch 等同步环境
  */
 export function serializeSync(value: any): any {
@@ -128,6 +132,23 @@ export function serializeSync(value: any): any {
             v: buf.toString("base64"),
             ct: value.constructor.name
         }
+    }
+
+    // Blob / File (Existing ones with _buffer)
+    // 如果是反序列化回来的 Blob/File，会挂载 _buffer 属性，可以直接同步序列化
+    if ((value instanceof Blob || (typeof File !== "undefined" && value instanceof File)) && (value as any)._buffer) {
+        const buf = (value as any)._buffer as Buffer
+        const meta: any = { $t: "b", v: buf.toString("base64") }
+        if (value instanceof File) {
+            meta.ct = "File"
+            meta.name = value.name
+            meta.type = value.type
+            meta.lm = value.lastModified
+        } else {
+            meta.ct = "Blob"
+            meta.type = value.type
+        }
+        return meta
     }
 
     // Buffer (Node.js)

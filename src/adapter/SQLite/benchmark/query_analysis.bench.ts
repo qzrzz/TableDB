@@ -93,7 +93,7 @@ async function setupTable() {
 async function generateData(table: Table<IBenchDoc>) {
     console.log(`正在生成 ${DATA_SIZE} 条文档...`)
     const docs: IBenchDoc[] = []
-    const types = ["A", "B", "C", "D", "E"]
+
 
     for (let i = 0; i < DATA_SIZE; i++) {
         // 混合类型: 20% 数组, 80% 标量
@@ -113,8 +113,8 @@ async function generateData(table: Table<IBenchDoc>) {
             id: `id_${i}`,
 
             // 基础类型
-            type_idx: types[i % types.length],
-            type_noidx: types[i % types.length],
+            type_idx: `type-${i}`,
+            type_noidx: `type-${i}`,
             val_idx: i,
             val_noidx: i,
 
@@ -200,7 +200,10 @@ async function benchmark(
     const avgTotal = stats.total / ITERATIONS
     const avgDb = stats.db / ITERATIONS
     const dirtyFields = lastDebug.dirtyReasons?.map(r => r.path).filter(Boolean).join(", ") || "-"
-    const resultCount = Array.isArray(result) ? result.length : (typeof result === 'number' ? result : '-')
+    let resultCount: any = Array.isArray(result) ? result.length : (typeof result === 'number' ? result : 1)
+    if (result === undefined) {
+        resultCount = "null"
+    }
 
     console.log(`[${category}] ${action} (${resultCount} results):`, JSON.stringify(lastDebug, null, 2), "\n")
 
@@ -226,23 +229,50 @@ async function main() {
     console.log(`正在运行基准测试 (每项运行 ${ITERATIONS} 次取平均)...\n`)
 
     // ==================== 精确匹配 ====================
-    await benchmark("精确匹配", "string 有索引 (type_idx)",
-        d => table.findMany({ type_idx: "A" }, { limit: 1, debug: d }))
+    await benchmark("精确匹配", "findMany string 有索引 (type_idx)",
+        d => table.findMany({ type_idx: `type-5223` }, { debug: d }))
 
-    await benchmark("精确匹配", "string 无索引 (type_noidx)",
-        d => table.findMany({ type_noidx: "A" }, { limit: 1, debug: d }))
+    await benchmark("精确匹配", "findMany string 无索引 (type_noidx)",
+        d => table.findMany({ type_noidx: `type-5223` }, { debug: d }))
 
-    await benchmark("精确匹配", "number 有索引 (val_idx)",
-        d => table.findMany({ val_idx: 42 }, { limit: 1, debug: d }))
+    await benchmark("精确匹配", "findOne string 有索引 (type_idx)",
+        d => table.findOne({ type_idx: `type-5223` }, { debug: d }))
 
-    await benchmark("精确匹配", "number 无索引 (val_noidx)",
-        d => table.findMany({ val_noidx: 42 }, { limit: 1, debug: d }))
 
-    await benchmark("精确匹配", "点号路径-有索引 (nested_idx.info)",
+    await benchmark("精确匹配", "findOne string 无索引 (type_noidx)",
+        d => table.findOne({ type_noidx: `type-5223` }, { debug: d }))
+
+
+    await benchmark("精确匹配", "findMany number 有索引 (val_idx)",
+        d => table.findMany({ val_idx: 42 }, { debug: d }))
+
+    await benchmark("精确匹配", "findMany number 无索引 (val_noidx)",
+        d => table.findMany({ val_noidx: 42 }, { debug: d }))
+
+
+
+    await benchmark("精确匹配", "findOne number 有索引 (val_idx)",
+        d => table.findOne({ val_idx: 42 }, { debug: d }))
+
+    await benchmark("精确匹配", "findOne number 无索引 (val_noidx)",
+        d => table.findOne({ val_noidx: 42 }, { debug: d }))
+
+
+    await benchmark("精确匹配", "findMany 点号路径-有索引 (nested_idx.info)",
         d => table.findMany({ "nested_idx.info": "info_25000" }, { debug: d }))
 
-    await benchmark("精确匹配", "点号路径-无索引 (meta.info)",
+    await benchmark("精确匹配", "findMany 点号路径-无索引 (meta.info)",
         d => table.findMany({ "meta.info": "info_25000" }, { debug: d }))
+
+
+
+    await benchmark("精确匹配", "findOne 点号路径-有索引 (nested_idx.info)",
+        d => table.findOne({ "nested_idx.info": "info_25000" }, { debug: d }))
+
+    await benchmark("精确匹配", "findOne 点号路径-无索引 (meta.info)",
+        d => table.findOne({ "meta.info": "info_25000" }, { debug: d }))
+
+
 
     // ==================== 范围查询 ====================
     await benchmark("范围查询", "有索引 (val_idx > 49900)",

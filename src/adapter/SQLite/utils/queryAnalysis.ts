@@ -181,12 +181,12 @@ export function analyzeQueryCompatibility(
                     }
                 } else {
                     // 隐式相等匹配 { field: value }
-                    if (val === null) {
-                        // Null 在 SQL 中需要 IS NULL，且 Mongo 的 null 语义（匹配 null 或 不存在）SQL 难以简单模拟
-                        reasons.push({ path, reason: "Null check requires JsMatch", value: null })
-                        isCompatible = false
+                    // null/undefined 查询现在可以用纯 SQL 实现
+                    // 参见 mongoToSql.ts 中的实现
+                    if (val === null || val === undefined) {
                         continue
                     }
+
 
                     if (!isCompatibleValue(val)) {
                         reasons.push({ path, reason: "Value type unsafe for implicit equality", value: val })

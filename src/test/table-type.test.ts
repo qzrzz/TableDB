@@ -400,7 +400,11 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
                 arr_numbers: [1, 2, 3, 5, 6],
                 arr_strings: ["a", "b", "c"],
                 arr_mixed: [1, "two", null, new Date("2020-01-01T00:00:00.000Z")],
-                arr_date: [new Date("2021-01-01T00:00:00.000Z"), new Date("2022-02-02T00:00:00.000Z"), new Date("2023-03-03T00:00:00.000Z")],
+                arr_date: [
+                    new Date("2021-01-01T00:00:00.000Z"),
+                    new Date("2022-02-02T00:00:00.000Z"),
+                    new Date("2023-03-03T00:00:00.000Z"),
+                ],
             },
             {
                 id: "d2",
@@ -520,5 +524,145 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
         const nestedAfter = await table.get("nested_date")
         expect(nestedAfter?.obj?.d).toBeInstanceOf(Date)
         expect(nestedAfter?.obj?.d).toEqual(new Date("2001-02-03T04:05:06.000Z"))
+    })
+
+    it("Blob 全面测试", async () => {
+        const id = "blob"
+        const bytes = new Uint8Array([1, 2, 3, 255])
+
+        const makeBlob = () => {
+            if (typeof Blob !== "undefined") return new Blob([bytes])
+            return bytes.buffer
+        }
+
+        await table.insertOne({ id, val: makeBlob() })
+        const doc = await table.get(id)
+        expect(doc).toBeDefined()
+
+        const extractBytes = async (val: any) => {
+            if (typeof Blob !== "undefined" && val instanceof Blob) {
+                const ab = await val.arrayBuffer()
+                return new Uint8Array(ab)
+            }
+            if (val instanceof ArrayBuffer) return new Uint8Array(val)
+            if (ArrayBuffer.isView(val)) return new Uint8Array(val.buffer, val.byteOffset, val.byteLength)
+            return new Uint8Array(val)
+        }
+
+        const view = await extractBytes(doc?.val)
+        expect(Array.from(view)).toEqual(Array.from(bytes))
+
+        // 更新为新的 Blob/二进制
+        const newBytes = new Uint8Array([9, 8, 7])
+        const newVal = typeof Blob !== "undefined" ? new Blob([newBytes]) : newBytes.buffer
+        await table.updateOne({ id }, { $set: { val: newVal } })
+        const updated = await table.get(id)
+        const updatedView = await extractBytes(updated?.val)
+        expect(Array.from(updatedView)).toEqual(Array.from(newBytes))
+    })
+
+    it("NaN,Infinity 全面测试", async () => {
+        let docs = [
+            { id: "nan", val: NaN, arr: [1, 2, 3, NaN], ob: { val: NaN } },
+            { id: "infinity", val: Infinity, arr: [1, 2, 3, 4, Infinity, -Infinity], ob: { val: Infinity } },
+            { id: "neg_infinity", val: -Infinity, arr: [1, 2, 3, 4 - Infinity], ob: { val: -Infinity } },
+            { id: "normal", val: 12345, arr: [1, 2, 3], ob: { val: 6789 } },
+        ]
+        // 插入包含 NaN 和 Infinity 的文档
+        await table.insertMany(docs)
+
+        // 读取并验证 NaN 和 Infinity 的类型保留
+        const re_get_nan = await table.get("nan")
+        expect(re_get_nan.val).toBeNaN()
+        expect(re_get_nan.arr[3]).toBeNaN()
+        expect(re_get_nan.ob.val).toBeNaN()
+        expect(re_get_nan).toEqual(docs[0])
+
+        const re_find_nan = await table.findOne({ id: "nan" })
+        expect(re_find_nan.val).toBeNaN()
+        expect(re_find_nan.arr[3]).toBeNaN()
+        expect(re_find_nan.ob.val).toBeNaN()
+        expect(re_find_nan).toEqual(docs[0])
+
+        const re_get_infinity = await table.get("infinity")
+        expect(re_get_infinity.val).toBe(Infinity)
+        expect(re_get_infinity.arr[4]).toBe(Infinity)
+        expect(re_get_infinity.arr[5]).toBe(-Infinity)
+        expect(re_get_infinity.ob.val).toBe(Infinity)
+        expect(re_get_infinity).toEqual(docs[1])
+
+        const re_find_infinity = await table.findOne({ id: "infinity" })
+        expect(re_find_infinity.val).toBe(Infinity)
+        expect(re_find_infinity.arr[4]).toBe(Infinity)
+        expect(re_find_infinity.arr[5]).toBe(-Infinity)
+        expect(re_find_infinity.ob.val).toBe(Infinity)
+        expect(re_find_infinity).toEqual(docs[1])
+
+        const re_get_neg_infinity = await table.get("neg_infinity")
+        expect(re_get_neg_infinity.val).toBe(-Infinity)
+        expect(re_get_neg_infinity.arr[3]).toBe(-Infinity)
+        expect(re_get_neg_infinity.ob.val).toBe(-Infinity)
+        expect(re_get_neg_infinity).toEqual(docs[2])
+
+        const re_find_neg_infinity = await table.findOne({ id: "neg_infinity" })
+        expect(re_find_neg_infinity.val).toBe(-Infinity)
+        expect(re_find_neg_infinity.arr[3]).toBe(-Infinity)
+        expect(re_find_neg_infinity.ob.val).toBe(-Infinity)
+        expect(re_find_neg_infinity).toEqual(docs[2])
+
+        // 匹配 NaN 和 Infinity
+        const re_find_nan_2 = await table.findMany({ val: NaN })
+        expect(re_find_nan_2).toHaveLength(1)
+        expect(re_find_nan_2[0].id).toBe("nan")
+
+        const re_find_infinity_2 = await table.findMany({ val: Infinity })
+        expect(re_find_infinity_2).toHaveLength(1)
+        expect(re_find_infinity_2[0].id).toBe("infinity")
+
+        const re_find_neg_infinity_2 = await table.findMany({ val: -Infinity })
+        expect(re_find_neg_infinity_2).toHaveLength(1)
+        expect(re_find_neg_infinity_2[0].id).toBe("neg_infinity")
+
+        // 把 NaN 和 Infinity 更新为正常数，再查询
+        await table.updateOne({ id: "nan" }, { $set: { val: 100, "arr.3": 4, "ob.val": 100 } })
+        await table.updateOne({ id: "infinity" }, { $set: { val: 200, "arr.4": 5, "ob.val": 200 } })
+
+        const doc_nan_normal = await table.get("nan")
+        expect(doc_nan_normal.val).toBe(100)
+        expect(doc_nan_normal.arr[3]).toBe(4)
+        expect(doc_nan_normal.ob.val).toBe(100)
+
+        const doc_inf_normal = await table.get("infinity")
+        expect(doc_inf_normal.val).toBe(200)
+        expect(doc_inf_normal.arr[4]).toBe(5)
+        expect(doc_inf_normal.ob.val).toBe(200)
+
+        // 再更新为 NaN 和 Infinity  再查询
+        await table.updateOne({ id: "nan" }, { $set: { val: NaN, "arr.3": NaN, "ob.val": NaN } })
+        await table.updateOne({ id: "infinity" }, { $set: { val: Infinity, "arr.4": Infinity, "ob.val": Infinity } })
+
+        const doc_nan_back = await table.get("nan")
+        expect(doc_nan_back.val).toBeNaN()
+        expect(doc_nan_back.arr[3]).toBeNaN()
+        expect(doc_nan_back.ob.val).toBeNaN()
+
+        const doc_inf_back = await table.get("infinity")
+        expect(doc_inf_back.val).toBe(Infinity)
+        expect(doc_inf_back.arr[4]).toBe(Infinity)
+        expect(doc_inf_back.ob.val).toBe(Infinity)
+
+        // 验证可以通过值再次查找到
+        const find_nan_back = await table.findOne({ val: NaN })
+        expect(find_nan_back?.id).toBe("nan")
+
+        // 再把 NaN 和 Infinity 更新为正常数，再查询
+        await table.updateOne({ id: "nan" }, { $set: { val: 0 } })
+        await table.updateOne({ id: "infinity" }, { $set: { val: 9999 } })
+
+        const doc_nan_final = await table.get("nan")
+        expect(doc_nan_final.val).toBe(0)
+        
+        const doc_inf_final = await table.get("infinity")
+        expect(doc_inf_final.val).toBe(9999)
     })
 })

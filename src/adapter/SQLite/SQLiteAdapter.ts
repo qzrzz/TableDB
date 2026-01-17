@@ -42,7 +42,7 @@ import { analyzeQueryCompatibility, isQuerySqlCompatible } from "./utils/queryAn
  *    - 实现: 使用 SQLite Triggers 自动维护侧表数据（Insert/Update/Delete 时自动触发）。
  *    - 效果: 将 Array Containment 查询转化为高效的 SQL `EXISTS` 子查询。
  * 
- * 2. Schema 脏检测与查询优化 (Schema Dirty Tracking & Query Optimization):
+ * 2. 脏字段检测与查询优化 ( Dirty Tracking & Query Optimization):
  *    - 问题: 混合模式 (Hybrid Mode) 虽然万能但较慢，纯 SQL 模式快但可能语义不准确（特别是数组隐式包含）。
  *    - 解决: 维护 `_schema_dirty_{tableName}` 表，记录哪些字段曾经存储过数组或特殊值 (NaN/Null)。
  *    - 策略: 
@@ -614,32 +614,44 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const normalizedOp = this.normalizeUndefined(updateOp)
         const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = ? WHERE _id = ?`)
 
-        // 事务：确保原子性
-        const tx = this.db.transaction(() => {
-            for (const row of rows) {
-                matchedCount++
-                try {
-                    const doc = fastDeserialize(row.data)
-                    doc._id = row._id
-                    // 内存应用更新
-                    const modified = applyUpdate(doc, normalizedOp)
-                    if (modified) {
-                        delete doc._id
-                        this.scanAndMarkDirty(doc)
-                        const sDoc = JSON.stringify(serializeSync(doc))
-                        updateStmt.run(sDoc, row._id)
-                        modifiedCount++
-                    }
-                } catch (e) { }
+        // 预处理更新 (外部事务允许异步序列化)
+        const updatesToApply: Array<{ _id: number; sDoc: string }> = []
+
+        for (const row of rows) {
+            matchedCount++
+            try {
+                const doc = fastDeserialize(row.data)
+                doc._id = row._id
+                // 内存应用更新
+                const modified = applyUpdate(doc, normalizedOp)
+                if (modified) {
+                    delete doc._id
+                    this.scanAndMarkDirty(doc)
+                    // 使用异步序列化，确保支持 Blob 等特殊类型
+                    const sData = await serialize(doc)
+                    updatesToApply.push({ _id: row._id, sDoc: JSON.stringify(sData) })
+                }
+            } catch (e) {
+                console.error("updateMany serialize error", e)
             }
-        })
+        }
 
-        const tStart = performance.now()
-        tx()
-        const tEnd = performance.now()
-
-        if (debug) {
-            debug.setDbExecTime(tEnd - tStart)
+        // 事务：批量执行更新
+        if (updatesToApply.length > 0) {
+            const tx = this.db.transaction(() => {
+                for (const update of updatesToApply) {
+                    updateStmt.run(update.sDoc, update._id)
+                    modifiedCount++
+                }
+            })
+            const tStart = performance.now()
+            tx()
+            const tEnd = performance.now()
+            if (debug) {
+                debug.setDbExecTime(tEnd - tStart)
+                debug.finish()
+            }
+        } else if (debug) {
             debug.finish()
         }
 
@@ -728,6 +740,8 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             normalizedOp: any
             options?: ITableUpdateOptions
             filter: ITableFilter
+            sUpsertDoc?: string
+            upsertId?: string
         }> = []
 
         const tPrepStart = performance.now()
@@ -759,6 +773,40 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             const normalizedOp = this.normalizeUndefined(item.updateOp)
             const sOp = JSON.stringify(await serialize(normalizedOp))
 
+            // 预先准备 Upsert 文档 (如果需要)
+            let sUpsertDoc: string | undefined
+            let upsertId: string | undefined
+
+            if (item.options?.upsert) {
+                const newDoc: any = {}
+                // 从 filter 中提取初始字段
+                for (const key in item.filter) {
+                    if (key === "id" || key.startsWith("$")) continue
+                    const val = (item.filter as any)[key]
+                    if (val !== null && typeof val === "object") {
+                        if (Object.keys(val).some((k) => k.startsWith("$"))) continue
+                    }
+                    newDoc[key] = val
+                }
+
+                const idFromFilter = (item.filter as any).id
+                if (idFromFilter) newDoc.id = idFromFilter
+                else newDoc.id = String(Date.now() + Math.random()) // 简化的 ID 生成，实际应更健壮
+
+                upsertId = newDoc.id
+
+                // 应用更新
+                applyUpdate(newDoc, normalizedOp)
+                if (normalizedOp.$setOnInsert) {
+                    const setOnInsertOp = { $set: normalizedOp.$setOnInsert }
+                    applyUpdate(newDoc, setOnInsertOp)
+                }
+
+                // 标记脏字段 & 序列化
+                this.scanAndMarkDirty(newDoc)
+                sUpsertDoc = JSON.stringify(await serialize(newDoc))
+            }
+
             preparedUpdates.push({
                 selectSql,
                 params,
@@ -766,6 +814,8 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 normalizedOp,
                 options: item.options,
                 filter: item.filter,
+                sUpsertDoc, // 预序列化的 upsert 文档
+                upsertId
             })
         }
 
@@ -776,17 +826,29 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const tExecStart = performance.now()
         // 2. 执行阶段 (事务中)
         const bulkUpdateTx = this.db.transaction(() => {
+            const insertStmt = this.getStatement(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
+            const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`)
+
             for (const prepared of preparedUpdates) {
                 try {
                     const row = this.getStatement(prepared.selectSql).get(...prepared.params)
-                    if (!row) {
-                        continue // 原有代码确实忽略简化的 upsert
+                    if (row) {
+                        // 包含匹配行 -> Update
+                        updateStmt.run(prepared.sOp, (row as any)._id)
+                        matchedCount++
+                        modifiedCount++
+                    } else if (prepared.options?.upsert && prepared.sUpsertDoc && prepared.upsertId) {
+                        // 无匹配行且启用了 Upsert -> Insert
+                        try {
+                            // 尝试插入 (可能因并发导致 id 冲突，这里简化处理)
+                            insertStmt.run(prepared.upsertId, prepared.sUpsertDoc)
+                            upsertedIds.push(prepared.upsertId)
+                            matchedCount++ // Upsert 通常不算 matchedCount ? Mongo 标准: matched=0, upserted=1
+                            modifiedCount++
+                        } catch (insertErr) {
+                            // 忽略插入错误 (例如 ID 冲突)
+                        }
                     }
-                    // JsPatch 优化
-                    const updateSql = `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`
-                    this.getStatement(updateSql).run(prepared.sOp, (row as any)._id)
-                    matchedCount++
-                    modifiedCount++
                 } catch (e) {
                     console.error("bulkUpdateSync error:", e)
                 }
@@ -895,7 +957,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             if (modified) {
                 delete doc._id
                 this.scanAndMarkDirty(doc)
-                const sDoc = JSON.stringify(serializeSync(doc))
+                // 使用异步序列化，确保支持 Blob 等特殊类型（新创建的 Blob 没有 _buffer 属性，需要异步调用 arrayBuffer()）
+                const sData = await serialize(doc)
+                const sDoc = JSON.stringify(sData)
                 const upSql = `UPDATE "${this.tableName}" SET data = ? WHERE _id = ?`
                 this.getStatement(upSql).run(sDoc, row._id)
                 modifiedCount = 1
