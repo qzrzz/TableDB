@@ -1,4 +1,5 @@
 import { ITableDoc } from "../adapter/adapter"
+import { TabeEvents } from "./event"
 import { Table } from "./Table"
 import { ITableFilter, ITableUpdateOp } from "./types"
 import { UID } from "fzz"
@@ -11,6 +12,7 @@ export function __check_filter(
     filter: ITableFilter,
     options?: { ignoreMarkDelete?: boolean; realDelete?: boolean } & Record<string, any>
 ) {
+    this.eventHub.emit(TabeEvents.CheckFilter, { filter, options })
     if (this.options?.enableMarkDelete && !options?.ignoreMarkDelete && !options?.realDelete) {
         let f = filter as any
         if (
@@ -30,6 +32,8 @@ export function __check_filter(
  */
 export function __check_input_doc(this: Table, doc: Partial<ITableDoc> | void) {
     if (!doc) return
+
+    this.eventHub.emit(TabeEvents.CheckInputDoc, doc)
     // 如果 id 不存在，则自动生成一个唯一 ID
     if (doc.id === undefined) {
         doc.id = UID.new()
@@ -40,6 +44,7 @@ export function __check_input_doc(this: Table, doc: Partial<ITableDoc> | void) {
  * 在插入或更新文档前，进行检查和修正
  */
 export function __check_find_options(this: Table, options?: { projection?: any }) {
+    this.eventHub.emit(TabeEvents.CheckFindOptions, options)
     if (options?.projection) {
         // 处理预设投影
         if (typeof options.projection === "string") {
@@ -53,6 +58,7 @@ export function __check_find_options(this: Table, options?: { projection?: any }
  */
 export function __check_output_doc(this: Table, doc: Partial<ITableDoc> | void) {
     if (!doc) return
+    this.eventHub.emit(TabeEvents.CheckOutputDoc, doc)
 }
 
 /**
@@ -60,4 +66,5 @@ export function __check_output_doc(this: Table, doc: Partial<ITableDoc> | void) 
  */
 export function __check_update_op(this: Table, updateOp: ITableUpdateOp | void) {
     if (!updateOp) return
+    this.eventHub.emit(TabeEvents.CheckUpdateOp, updateOp)
 }

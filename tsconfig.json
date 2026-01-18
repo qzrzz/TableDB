@@ -19,7 +19,7 @@
         "moduleResolution": "bundler",
         "useDefineForClassFields": true,
         "allowImportingTsExtensions": true,
-        "baseUrl": ".",
+ 
         "paths": {
             "tbdb": [
                 "./src/index.ts"

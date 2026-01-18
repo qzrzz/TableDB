@@ -661,7 +661,7 @@ describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
 
         const doc_nan_final = await table.get("nan")
         expect(doc_nan_final.val).toBe(0)
-        
+
         const doc_inf_final = await table.get("infinity")
         expect(doc_inf_final.val).toBe(9999)
     })

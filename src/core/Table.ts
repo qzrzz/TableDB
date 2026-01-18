@@ -1,3 +1,4 @@
+import { EventHub } from "fzz"
 import {
     ITableDBAdapterInstance,
     ITableDBAdapter,
@@ -25,6 +26,7 @@ import {
 } from "./list"
 import { __schema_init, ISchemaHints } from "./schema"
 import { ITableFilter, ITableUpdateOp } from "./types"
+import { TableEeventDefifne } from "./event"
 
 export interface ITableOptions<TSchema, TPlv extends IPlvMap = IPlvMap> {
     /** Talbe 名称
@@ -81,10 +83,12 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
     adapter!: ITableDBAdapterInstance
     schema!: TSchema
     inited!: Promise<boolean>
+    eventHub!: EventHub<typeof TableEeventDefifne>
     constructor(tableOptions: ITableOptions<TSchema, TPlv>) {
         this.name = tableOptions.name
         this.options = tableOptions
         this.schema = tableOptions.schema as TSchema
+        this.eventHub = new EventHub()
         this.inited = this.init()
     }
 
@@ -128,7 +132,7 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
     }
     /** 设置单个文档 */
     async set(id: any, doc: Partial<TSchema>): Promise<void> {
-        ; (doc as any).id = id
+        ;(doc as any).id = id
         this.__check_input_doc(doc)
         return this.adapter.set(id, doc)
     }
