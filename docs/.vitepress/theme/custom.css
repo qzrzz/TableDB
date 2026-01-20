@@ -1,0 +1,6 @@
+:root {
+    --vp-font-family-base:
+        Inter, "Inter UI", Helvetica, "PingFang SC", "Source Han Sans SC", "Microsoft YaHei UI", -apple-system,
+        sans-serif, "Microsoft YaHei", sans-serif;
+    --vp-font-family-mono: "JetBrains Mono", monospace;
+}

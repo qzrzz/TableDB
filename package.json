@@ -21,6 +21,7 @@
         "docs:preview": "vitepress preview docs"
     },
     "devDependencies": {
+        "@fontsource/jetbrains-mono": "5.2.8",
         "@rslib/core": "^0.19.1",
         "@types/better-sqlite3": "7.6.13",
         "@types/fs-extra": "11.0.4",
@@ -31,6 +32,8 @@
         "vitepress": "2.0.0-alpha.15"
     },
     "dependencies": {
+        "@fontsource/google-sans-code": "5.2.3",
+        "@fontsource/inter": "5.2.8",
         "better-sqlite3": "12.6.0",
         "es-toolkit": "1.43.0",
         "fzz": "*",
