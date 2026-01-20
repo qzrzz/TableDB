@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll } from "vitest"
 import { Table } from "../index"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"] // 暂时只测试 sqlite，因为 mongodb 环境可能未就绪，或者可以加上 "mongodb" 但需确保连接
+const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"] // 暂时只测试 sqlite，因为 mongodb 环境可能未就绪，或者可以加上 "mongodb" 但需确保连接
 
 describe.each(DATABASE_TYPES)("表格类型支持测试 - %s", (dbType) => {
     let table: Table<any>

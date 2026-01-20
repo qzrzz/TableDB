@@ -26,6 +26,7 @@
         "@types/better-sqlite3": "7.6.13",
         "@types/fs-extra": "11.0.4",
         "@types/node": "^22",
+        "fake-indexeddb": "6.2.5",
         "fs-extra": "11.3.3",
         "tinybench": "6.0.0",
         "typescript": "^5.9.3",

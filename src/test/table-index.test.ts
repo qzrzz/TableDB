@@ -2,7 +2,7 @@
 import { Table } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["mongodb", "sqlite"]
+const DATABASE_TYPES: TestDatabaseType[] = ["mongodb", "sqlite", "indexeddb"]
 
 // 使用 describe.each 并在描述中包含 dbType 以区分测试
 describe.each(DATABASE_TYPES)("索引测试 (Table Index) - %s", (dbType) => {

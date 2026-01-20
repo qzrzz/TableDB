@@ -2,7 +2,7 @@ import { Table } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 import { ITableDoc } from "../adapter/adapter"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"]
+const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"]
 
 interface ITestDoc extends ITableDoc {
     id: string

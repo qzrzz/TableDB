@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll, beforeEach, afterAll } from "vitest"
 import { Table } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"]
+const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"]
 
 describe.each(DATABASE_TYPES)("Table MarkDelete - %s", async (dbType) => {
     let table!: Table

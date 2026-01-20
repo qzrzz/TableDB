@@ -23,7 +23,7 @@ const distDir = path.resolve(__dirname, "./dist")
 const backupPath = path.join(distDir, "backup.cbor")
 const backupPathUncompressed = path.join(distDir, "backup-uncompressed.cbor")
 
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"]
+const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"]
 
 // ============================================================================
 // 测试套件

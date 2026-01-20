@@ -1,7 +1,7 @@
 import { Table } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["mongodb", "sqlite"]
+const DATABASE_TYPES: TestDatabaseType[] = ["mongodb", "sqlite", "indexeddb"]
 
 describe.each(DATABASE_TYPES)("Table filter - %s", async (dbType) => {
     let table!: Table

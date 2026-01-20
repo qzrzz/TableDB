@@ -4,7 +4,7 @@ import { joinListWithTable } from "../core/join"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 import { ITableDoc } from "../adapter/adapter"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"]
+const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"]
 
 interface IUserDoc extends ITableDoc {
     id: string

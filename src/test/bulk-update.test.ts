@@ -1,7 +1,7 @@
 import { Table } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"]
+const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"]
 
 describe.each(DATABASE_TYPES)("Table bulkUpdate() - %s", async (dbType) => {
     let table: Table

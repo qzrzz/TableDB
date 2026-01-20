@@ -2,7 +2,7 @@ import { Table } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 import { TabeEvents } from "../core/event"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["mongodb", "sqlite"]
+const DATABASE_TYPES: TestDatabaseType[] = ["mongodb", "sqlite", "indexeddb"]
 
 describe.each(DATABASE_TYPES)("Table eventHub - %s", async (dbType) => {
     test("CheckInputDoc: 触发并允许修改待写入文档", async () => {

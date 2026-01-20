@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll, beforeEach } from "vitest"
 import { Table, } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"]
+const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"]
 
 describe.each(DATABASE_TYPES)("Table 类型排序与过滤测试 - %s", async (dbType) => {
     let table: Table 

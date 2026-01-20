@@ -9,7 +9,7 @@ import { getTestTableByType, TestDatabaseType } from "./getTestTable"
  * 3. { field: { $type: 10 } } 仅匹配 field 值为 null 的文档（不包括缺失字段）
  * 4. { field: { $exists: false } } 仅匹配不包含 field 的文档
  */
-const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb"]
+const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"]
 
 describe.each(DATABASE_TYPES)("Null & Undefined Query - %s", (dbType) => {
     let table!: Table
