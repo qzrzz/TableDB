@@ -214,6 +214,11 @@ export interface ITableSetOptions {
     /** 是否只更新已存在的文档，不存在的文档不进行插入 */
     updateOnly?: boolean
 
+    /** 仅在插入新文档时设置的字段
+     *  类似于 updateOp 的 $setOnInsert，用于设置 _createDate 等元数据
+     */
+    setOnInsert?: Record<string, any>
+
     /** 调试信息存储对象
      *  提供一个对象用来接受调试信息，调试信息会写入该对象 */
     debug?: ITableDebugResult

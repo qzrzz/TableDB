@@ -34,7 +34,7 @@ export function MongoDBAdapter(config: { auth: string; dbName: string }) {
 
 export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
     name = "MongoDBAdapter"
-    constructor(public collection: Collection) {}
+    constructor(public collection: Collection) { }
 
     // -------------------------------------------------------
     // KV 基础操作
@@ -322,10 +322,17 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
                     // 使用 updateOne + $setOnInsert + upsert 来实现 "仅插入不更新"
                     // 如果存在：匹配但不修改
                     // 如果不存在：插入
+                    // 合并 options.setOnInsert（用于 _createDate 等元数据）
+                    let setOnInsertDoc = mongoDoc
+                    if (options?.setOnInsert) {
+                        let mongoSetOnInsert = jsToMongo(options.setOnInsert)
+                        if (mongoSetOnInsert instanceof Promise) mongoSetOnInsert = await mongoSetOnInsert
+                        setOnInsertDoc = { ...mongoSetOnInsert, ...mongoDoc }
+                    }
                     return {
                         updateOne: {
                             filter,
-                            update: { $setOnInsert: mongoDoc },
+                            update: { $setOnInsert: setOnInsertDoc },
                             upsert: true,
                         },
                     }
@@ -357,10 +364,19 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
                     }
                 }
 
+                // 默认行为：使用 $set 更新，支持 setOnInsert 选项
+                const updateOp: any = { $set: mongoDoc }
+                // 如果有 setOnInsert 选项，在 upsert 时添加 $setOnInsert
+                if (options?.setOnInsert) {
+                    let mongoSetOnInsert = jsToMongo(options.setOnInsert)
+                    if (mongoSetOnInsert instanceof Promise) mongoSetOnInsert = await mongoSetOnInsert
+                    updateOp.$setOnInsert = mongoSetOnInsert
+                }
+
                 return {
                     updateOne: {
                         filter,
-                        update: { $set: mongoDoc },
+                        update: updateOp,
                         upsert: !options?.updateOnly,
                     },
                 }

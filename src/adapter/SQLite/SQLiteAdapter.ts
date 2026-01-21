@@ -1142,7 +1142,13 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 } else {
                     if (options?.updateOnly) continue
 
-                    stmtInsert.run(id, serializedData)
+                    // 如果有 setOnInsert 选项，在插入新文档时合并这些字段
+                    let finalDoc = normalizedDoc
+                    if (options?.setOnInsert) {
+                        finalDoc = { ...options.setOnInsert, ...normalizedDoc }
+                    }
+                    const sFinalDoc = serializeSync(finalDoc)
+                    stmtInsert.run(id, JSON.stringify(sFinalDoc))
                     result.insertedCount++
                     result.insertedIds.push(id)
                 }

@@ -61,7 +61,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
     private version: number = 0
     private initPromise: Promise<void> | null = null
 
-    constructor(private dbName: string, public tableName: string) {}
+    constructor(private dbName: string, public tableName: string) { }
 
     async init() {
         if (this.db) return
@@ -103,7 +103,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
     private async getStore(mode: IDBTransactionMode = "readonly"): Promise<IDBObjectStore> {
         while (true) {
             if (!this.db) await this.init()
-            
+
             if (this.db!.objectStoreNames.contains(this.tableName)) {
                 try {
                     const transaction = this.db!.transaction(this.tableName, mode)
@@ -117,7 +117,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
                     throw e
                 }
             }
-            
+
             // 表不存在，尝试升级
             await this.reopenForTable()
         }
@@ -131,7 +131,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
             this.db.close()
             this.db = null
         }
-        
+
         try {
             this.db = await this.openDB(newVersion)
             this.version = this.db.version
@@ -187,7 +187,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
     async get(id: any): Promise<ITableDoc | void> {
         const store = await this.getStore()
         return new Promise((resolve, reject) => {
-            const request = store.get(id) 
+            const request = store.get(id)
             request.onerror = () => reject(request.error)
             request.onsuccess = () => {
                 const doc = request.result
@@ -202,10 +202,10 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
         const normalizedValue = this.normalizeUndefined(value)
         return new Promise((resolve, reject) => {
             // 确保有 _id 和 id，且 id 类型被保留
-            const doc = { 
+            const doc = {
                 _id: (value as any)._id || this.generateId(),
-                ...normalizedValue, 
-                id: id 
+                ...normalizedValue,
+                id: id
             }
             const request = store.put(doc)
             request.onerror = () => reject(request.error)
@@ -216,7 +216,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
     async delete(id: any): Promise<void> {
         const store = await this.getStore("readwrite")
         return new Promise((resolve, reject) => {
-            const request = store.delete(id) 
+            const request = store.delete(id)
             request.onerror = () => reject(request.error)
             request.onsuccess = () => resolve()
         })
@@ -296,15 +296,15 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
         })
 
         if (options?.sort) this.applySort(results, options.sort)
-        else this.applySort(results, { _id: 1 }) 
-        
+        else this.applySort(results, { _id: 1 })
+
         let finalDocs = results
         if (offset > 0 || limit !== Infinity) {
             finalDocs = results.slice(offset, offset + limit)
         }
 
         const proj = normalizeProjection(options?.projection)
-        
+
         let isOnlyIdInclusion = false
         if (proj) {
             const keys = Object.keys(proj)
@@ -313,7 +313,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
 
         return finalDocs.map(d => {
             if (isOnlyIdInclusion) return d
-            
+
             const p = project(d, proj)
             if (!includeHidden && !(proj && proj._id === 1)) delete (p as any)._id
             return p as ITableDoc
@@ -391,14 +391,14 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
     async insertMany(docs: Partial<ITableDoc>[]): Promise<ITableInsertResult> {
         const result: ITableInsertResult = { insertedCount: 0, skippedCount: 0, insertedIds: [], skippedIds: [] }
         const store = await this.getStore("readwrite")
-        
+
         for (const doc of docs) {
             const docId = doc.id || this.generateId()
             const normalizedDoc = this.normalizeUndefined(doc)
             try {
                 await new Promise<void>((resolve, reject) => {
                     const finalDoc = { _id: (doc as any)._id || this.generateId(), ...normalizedDoc, id: docId }
-                    const request = store.add(finalDoc) 
+                    const request = store.add(finalDoc)
                     request.onerror = (e) => { e.preventDefault(); e.stopPropagation(); reject(request.error) }
                     request.onsuccess = () => resolve()
                 })
@@ -425,7 +425,9 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
                 result.overwriteCount++
             } else {
                 if (options?.updateOnly) continue
-                await this.set(doc.id, doc)
+                // 如果有 setOnInsert 选项，在插入新文档时合并这些字段
+                const finalDoc = options?.setOnInsert ? { ...options.setOnInsert, ...doc } : doc
+                await this.set(finalDoc.id, finalDoc)
                 result.insertedCount++; result.insertedIds.push(doc.id)
             }
         }
@@ -454,7 +456,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
 
     async defineIndexes(indexes: ITableIndexConfig[], options?: ITableDefineIndexesOptions): Promise<void> {
         if (!this.db) await this.init()
-        
+
         // 确保表已存在
         await this.getStore("readonly")
 
@@ -517,7 +519,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
         this.version = this.db!.version
     }
 
-    async compact(): Promise<void> {}
+    async compact(): Promise<void> { }
 
     private async performUpsert(filter: ITableFilter, updateOp: ITableUpdateOp<ITableDoc>): Promise<string> {
         const newDoc: any = { id: (filter as any).id || String(this.generateId()) }
@@ -552,6 +554,10 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
             for (const { key, dir } of criteria) {
                 const va = a[key], vb = b[key]
                 if (va === vb) continue
+                // 处理 null/undefined 情况：null/undefined 排在最后
+                if (va == null && vb == null) continue
+                if (va == null) return dir
+                if (vb == null) return -dir
                 return (va > vb) ? dir : -dir
             }
             return 0

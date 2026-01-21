@@ -54,6 +54,8 @@ export interface ITableOptions<TSchema, TPlv extends IPlvMap = IPlvMap> {
 
     /** 是否启用标记删除功能 */
     enableMarkDelete?: boolean
+    /** 是否启用自动元数据功能（_updateDate, _createDate, _deleteDate） */
+    enableAutoMetadata?: boolean
     /** 是否启用目录树功能 */
     enableTree?: boolean
 
@@ -130,16 +132,32 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
         this.__check_output_doc(doc)
         return doc as any
     }
+
     /** 设置单个文档 */
     async set(id: any, doc: Partial<TSchema>): Promise<void> {
-        ;(doc as any).id = id
+        ; (doc as any).id = id
         this.__check_input_doc(doc)
+        // 启用自动元数据时，使用 setMany 来处理 _createDate 和 _updateDate
+        if (this.options?.enableAutoMetadata) {
+            const now = new Date()
+                ; (doc as any)._updateDate = now
+            await this.adapter.setMany([doc], { setOnInsert: { _createDate: now } })
+            return
+        }
         return this.adapter.set(id, doc)
     }
+
     /** 删除单个文档 */
     async delete(id: any, options?: ITableDeleteOptions) {
         if (this.options?.enableMarkDelete && options?.readDelete !== true) {
-            await this.adapter.updateOne({ id }, { $set: { _isDeleted: true } })
+            // 标记删除时的元数据处理
+            const updateSet: any = { _isDeleted: true }
+            if (this.options?.enableAutoMetadata) {
+                const now = new Date()
+                updateSet._deleteDate = now
+                updateSet._updateDate = now
+            }
+            await this.adapter.updateOne({ id }, { $set: updateSet })
             return
         }
 
@@ -241,6 +259,15 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
     ): Promise<ITableUpdateResult> {
         this.__check_filter(filter)
         this.__check_update_op(updateOp)
+        // 启用自动元数据时，自动添加 _updateDate 和 _createDate（用于 upsert）
+        if (this.options?.enableAutoMetadata) {
+            const now = new Date()
+            updateOp = {
+                ...updateOp,
+                $set: { ...(updateOp.$set || {}), _updateDate: now } as any,
+                $setOnInsert: { ...(updateOp.$setOnInsert || {}), _createDate: now } as any,
+            }
+        }
         return this.adapter.updateOne(filter, updateOp, options)
     }
 
@@ -263,6 +290,15 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
     ): Promise<ITableUpdateResult> {
         this.__check_filter(filter)
         this.__check_update_op(updateOp)
+        // 启用自动元数据时，自动添加 _updateDate 和 _createDate（用于 upsert）
+        if (this.options?.enableAutoMetadata) {
+            const now = new Date()
+            updateOp = {
+                ...updateOp,
+                $set: { ...(updateOp.$set || {}), _updateDate: now } as any,
+                $setOnInsert: { ...(updateOp.$setOnInsert || {}), _createDate: now } as any,
+            }
+        }
         return this.adapter.updateMany(filter, updateOp, options)
     }
 
@@ -276,6 +312,18 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
             this.__check_filter(update.filter)
             this.__check_update_op(update.updateOp)
         }
+        // 启用自动元数据时，为每个更新操作添加 _updateDate 和 _createDate
+        if (this.options?.enableAutoMetadata) {
+            const now = new Date()
+            updates = updates.map(u => ({
+                ...u,
+                updateOp: {
+                    ...u.updateOp,
+                    $set: { ...(u.updateOp.$set || {}), _updateDate: now } as any,
+                    $setOnInsert: { ...(u.updateOp.$setOnInsert || {}), _createDate: now } as any,
+                },
+            }))
+        }
         return this.adapter.bulkUpdate(updates)
     }
 
@@ -285,6 +333,14 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
      *  文档必须有 ID 字段，如果没有 ID 字段会自动生成一个唯一 ID
      */
     async insertMany(docs: Partial<TSchema>[]): Promise<ITableInsertResult> {
+        // 启用自动元数据时，为每个文档添加 _createDate 和 _updateDate
+        if (this.options?.enableAutoMetadata) {
+            const now = new Date()
+            for (let doc of docs) {
+                ; (doc as any)._createDate = now
+                    ; (doc as any)._updateDate = now
+            }
+        }
         for (let doc of docs) {
             this.__check_input_doc(doc)
         }
@@ -311,6 +367,31 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
      *
      */
     async setMany(docs: Partial<TSchema>[], options?: ITableSetOptions): Promise<ITableSetResult> {
+        // 启用自动元数据时，为每个文档添加 _updateDate，并使用 setOnInsert 添加 _createDate
+        if (this.options?.enableAutoMetadata) {
+            const now = new Date()
+            for (let doc of docs) {
+                ; (doc as any)._updateDate = now
+            }
+
+            // overwrite 模式使用 replaceOne，不支持 $setOnInsert
+            // 需要先查询已存在文档的 _createDate，并保留它
+            if (options?.overwrite) {
+                for (let doc of docs) {
+                    const existingDoc = await this.adapter.get((doc as any).id)
+                    if (existingDoc && existingDoc._createDate) {
+                        // 保留已存在文档的 _createDate
+                        ; (doc as any)._createDate = existingDoc._createDate
+                    } else {
+                        // 新文档，设置 _createDate
+                        ; (doc as any)._createDate = now
+                    }
+                }
+            } else {
+                // 非 overwrite 模式，使用 setOnInsert 处理 _createDate
+                options = { ...options, setOnInsert: { ...(options?.setOnInsert || {}), _createDate: now } }
+            }
+        }
         for (let doc of docs) {
             this.__check_input_doc(doc)
         }
@@ -333,7 +414,14 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
     async deleteMany(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
         this.__check_filter(filter, options)
         if (this.options?.enableMarkDelete && options?.readDelete !== true) {
-            let re = await this.adapter.updateMany(filter, { $set: { _isDeleted: true } })
+            // 标记删除时的元数据处理
+            const updateSet: any = { _isDeleted: true }
+            if (this.options?.enableAutoMetadata) {
+                const now = new Date()
+                updateSet._deleteDate = now
+                updateSet._updateDate = now
+            }
+            let re = await this.adapter.updateMany(filter, { $set: updateSet })
             return { deletedCount: re.modifiedCount }
         }
         return this.adapter.deleteMany(filter)
@@ -357,7 +445,14 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
     async deleteOne(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
         this.__check_filter(filter, options)
         if (this.options?.enableMarkDelete && options?.readDelete !== true) {
-            let re = await this.adapter.updateOne(filter, { $set: { _isDeleted: true } }, options)
+            // 标记删除时的元数据处理
+            const updateSet: any = { _isDeleted: true }
+            if (this.options?.enableAutoMetadata) {
+                const now = new Date()
+                updateSet._deleteDate = now
+                updateSet._updateDate = now
+            }
+            let re = await this.adapter.updateOne(filter, { $set: updateSet }, options)
             return { deletedCount: re.modifiedCount }
         }
         return this.adapter.deleteOne(filter, options)
