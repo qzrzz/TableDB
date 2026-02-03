@@ -110,14 +110,14 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
 
     // -------------------------------------------------------
     // schema 相关
-    __schema_hints!: ISchemaHints
-    __schema_init = __schema_init
+    private __schema_hints!: ISchemaHints
+    private __schema_init = __schema_init
     // 检查接口
-    __check_filter = __check_filter
-    __check_output_doc = __check_output_doc
-    __check_find_options = __check_find_options
-    __check_input_doc = __check_input_doc
-    __check_update_op = __check_update_op
+    private __check_filter = __check_filter
+    private __check_output_doc = __check_output_doc
+    private __check_find_options = __check_find_options
+    private __check_input_doc = __check_input_doc
+    private __check_update_op = __check_update_op
     // -------------------------------------------------------
     // KV 操作
 
@@ -135,12 +135,12 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
 
     /** 设置单个文档 */
     async set(id: any, doc: Partial<TSchema>): Promise<void> {
-        ; (doc as any).id = id
+        ;(doc as any).id = id
         this.__check_input_doc(doc)
         // 启用自动元数据时，使用 setMany 来处理 _createDate 和 _updateDate
         if (this.options?.enableAutoMetadata) {
             const now = new Date()
-                ; (doc as any)._updateDate = now
+            ;(doc as any)._updateDate = now
             await this.adapter.setMany([doc], { setOnInsert: { _createDate: now } })
             return
         }
@@ -315,7 +315,7 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
         // 启用自动元数据时，为每个更新操作添加 _updateDate 和 _createDate
         if (this.options?.enableAutoMetadata) {
             const now = new Date()
-            updates = updates.map(u => ({
+            updates = updates.map((u) => ({
                 ...u,
                 updateOp: {
                     ...u.updateOp,
@@ -337,8 +337,8 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
         if (this.options?.enableAutoMetadata) {
             const now = new Date()
             for (let doc of docs) {
-                ; (doc as any)._createDate = now
-                    ; (doc as any)._updateDate = now
+                ;(doc as any)._createDate = now
+                ;(doc as any)._updateDate = now
             }
         }
         for (let doc of docs) {
@@ -371,7 +371,7 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
         if (this.options?.enableAutoMetadata) {
             const now = new Date()
             for (let doc of docs) {
-                ; (doc as any)._updateDate = now
+                ;(doc as any)._updateDate = now
             }
 
             // overwrite 模式使用 replaceOne，不支持 $setOnInsert
@@ -381,10 +381,10 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
                     const existingDoc = await this.adapter.get((doc as any).id)
                     if (existingDoc && existingDoc._createDate) {
                         // 保留已存在文档的 _createDate
-                        ; (doc as any)._createDate = existingDoc._createDate
+                        ;(doc as any)._createDate = existingDoc._createDate
                     } else {
                         // 新文档，设置 _createDate
-                        ; (doc as any)._createDate = now
+                        ;(doc as any)._createDate = now
                     }
                 }
             } else {
