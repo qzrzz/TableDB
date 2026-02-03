@@ -1,14 +1,8 @@
 {
     "compilerOptions": {
-        "lib": [
-            "ES2024",
-            "DOM"
-        ],
+        "lib": ["ES2024", "DOM"],
         "module": "ESNext",
         "target": "es2024",
-        "types": [
-            "vitest/globals"
-        ],
         "allowJs": true,
         "noEmit": true,
         "strict": true,
@@ -17,16 +11,12 @@
         "isolatedModules": true,
         "resolveJsonModule": true,
         "moduleResolution": "bundler",
+        "moduleDetection": "force",
         "useDefineForClassFields": true,
         "allowImportingTsExtensions": true,
- 
         "paths": {
-            "tbdb": [
-                "./src/index.ts"
-            ]
+            "tbdb": ["./src/index.ts"]
         }
     },
-    "include": [
-        "src"
-    ]
+    "include": ["src"]
 }

@@ -1,11 +1,10 @@
-import { describe, test, expect, beforeAll, beforeEach } from "vitest"
-import { Table, } from "../core/Table"
+import { Table } from "../core/Table"
 import { getTestTableByType, TestDatabaseType } from "./getTestTable"
 
 const DATABASE_TYPES: TestDatabaseType[] = ["sqlite", "mongodb", "indexeddb"]
 
 describe.each(DATABASE_TYPES)("Table 类型排序与过滤测试 - %s", async (dbType) => {
-    let table: Table 
+    let table: Table
 
     beforeAll(async () => {
         table = (await getTestTableByType("sortTypeTestTable", dbType)) as any
@@ -95,7 +94,11 @@ describe.each(DATABASE_TYPES)("Table 类型排序与过滤测试 - %s", async (d
 
         // 升序排序
         const asc = await table.findMany({}, { sort: { dateVal: 1 } })
-        expect(asc.map((d) => (d.dateVal as Date | undefined)?.getTime())).toEqual([d1.getTime(), d2.getTime(), d3.getTime()])
+        expect(asc.map((d) => (d.dateVal as Date | undefined)?.getTime())).toEqual([
+            d1.getTime(),
+            d2.getTime(),
+            d3.getTime(),
+        ])
 
         // 过滤 $gt
         const gt = await table.findMany({ dateVal: { $gt: d1 } }, { sort: { dateVal: 1 } })
