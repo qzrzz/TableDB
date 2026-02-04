@@ -21,20 +21,19 @@ export default defineConfig({
 
         sidebar: [
             {
-                text: "指南",
+                text: "基础",
                 collapsed: false,
                 items: [
                     { text: "介绍", link: "/" },
-                    { text: "安装", link: "/" },
-                    { text: "基本用法", link: "/" },
-                    { text: "实现原理", link: "/" },
+                    { text: "文档", link: "/基础/文档.md" },
+                    { text: "定义表", link: "/基础/定义表.md" },
+                    { text: "索引", link: "/基础/索引.md" },
                 ],
             },
             {
                 text: "增删改查",
                 collapsed: false,
                 items: [
-                    { text: "文档", link: "/增删改查/文档.md" },
                     { text: "创建", link: "/" },
                     { text: "查询", link: "/" },
                     { text: "更新", link: "/" },
