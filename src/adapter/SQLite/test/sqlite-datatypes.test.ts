@@ -239,6 +239,101 @@ describe("SQLiteAdapter 数据类型测试", () => {
             expect(resultView.getInt32(0)).toBe(42)
             expect(resultView.getInt32(4)).toBe(100)
         })
+
+        test("Error - 基本 Error", async () => {
+            const error = new Error("测试错误消息")
+            const doc = { id: "error1", value: error }
+            await table.set(doc.id, doc)
+            const result = await table.get(doc.id)
+            expect(result?.value).toBeInstanceOf(Error)
+            expect((result?.value as Error).name).toBe("Error")
+            expect((result?.value as Error).message).toBe("测试错误消息")
+            expect((result?.value as Error).stack).toBeDefined()
+        })
+
+        test("Error - TypeError", async () => {
+            const error = new TypeError("类型错误")
+            const doc = { id: "error2", value: error }
+            await table.set(doc.id, doc)
+            const result = await table.get(doc.id)
+            expect(result?.value).toBeInstanceOf(TypeError)
+            expect((result?.value as Error).name).toBe("TypeError")
+            expect((result?.value as Error).message).toBe("类型错误")
+        })
+
+        test("Error - RangeError", async () => {
+            const error = new RangeError("范围错误")
+            const doc = { id: "error3", value: error }
+            await table.set(doc.id, doc)
+            const result = await table.get(doc.id)
+            expect(result?.value).toBeInstanceOf(RangeError)
+            expect((result?.value as Error).name).toBe("RangeError")
+            expect((result?.value as Error).message).toBe("范围错误")
+        })
+
+        test("Error - 带 cause 的 Error（1层嵌套）", async () => {
+            const cause = new Error("原因错误")
+            const error = new Error("主错误", { cause })
+            const doc = { id: "error4", value: error }
+            await table.set(doc.id, doc)
+            const result = await table.get(doc.id)
+            const resultError = result?.value as Error
+            expect(resultError).toBeInstanceOf(Error)
+            expect(resultError.message).toBe("主错误")
+            expect(resultError.cause).toBeInstanceOf(Error)
+            expect((resultError.cause as Error).message).toBe("原因错误")
+        })
+
+        test("Error - 带 cause 的 Error（3层嵌套）", async () => {
+            const cause3 = new Error("第三层原因")
+            const cause2 = new Error("第二层原因", { cause: cause3 })
+            const cause1 = new Error("第一层原因", { cause: cause2 })
+            const error = new Error("主错误", { cause: cause1 })
+            const doc = { id: "error5", value: error }
+            await table.set(doc.id, doc)
+            const result = await table.get(doc.id)
+            const resultError = result?.value as Error
+            expect(resultError.message).toBe("主错误")
+            expect((resultError.cause as Error).message).toBe("第一层原因")
+            expect(((resultError.cause as Error).cause as Error).message).toBe("第二层原因")
+            expect((((resultError.cause as Error).cause as Error).cause as Error).message).toBe("第三层原因")
+        })
+
+        test("Error - cause 超过3层时只保留前3层", async () => {
+            const cause4 = new Error("第四层原因")
+            const cause3 = new Error("第三层原因", { cause: cause4 })
+            const cause2 = new Error("第二层原因", { cause: cause3 })
+            const cause1 = new Error("第一层原因", { cause: cause2 })
+            const error = new Error("主错误", { cause: cause1 })
+            const doc = { id: "error6", value: error }
+            await table.set(doc.id, doc)
+            const result = await table.get(doc.id)
+            const resultError = result?.value as Error
+            // 只能恢复到第3层，第4层的 cause 应该是 undefined
+            const level3 = ((resultError.cause as Error).cause as Error).cause as Error
+            expect(level3.message).toBe("第三层原因")
+            expect(level3.cause).toBeUndefined()
+        })
+
+        test("Error - cause 为非 Error 类型", async () => {
+            const error = new Error("主错误", { cause: { code: 500, reason: "服务器错误" } })
+            const doc = { id: "error7", value: error }
+            await table.set(doc.id, doc)
+            const result = await table.get(doc.id)
+            const resultError = result?.value as Error
+            expect(resultError.message).toBe("主错误")
+            expect(resultError.cause).toEqual({ code: 500, reason: "服务器错误" })
+        })
+
+        test("Error - 自定义 Error 名称", async () => {
+            const error = new Error("自定义错误")
+            error.name = "CustomError"
+            const doc = { id: "error8", value: error }
+            await table.set(doc.id, doc)
+            const result = await table.get(doc.id)
+            expect((result?.value as Error).name).toBe("CustomError")
+            expect((result?.value as Error).message).toBe("自定义错误")
+        })
     })
 
     // ============================================

@@ -30,6 +30,8 @@ export type ITablePrimitive =
     | Float64Array
     | BigInt64Array
     | BigUint64Array
+    // Error 类型
+    | Error
 
 /**
  * Table 的数据类型，可以是基本类型、对象或数组

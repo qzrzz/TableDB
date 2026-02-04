@@ -58,6 +58,11 @@ export async function serialize(value: any): Promise<any> {
             return serializeSync(value)
         }
 
+        // 处理 Error 类型（包括 name, message, stack, cause，cause 最多递归3层）
+        if (value instanceof Error) {
+            return serializeSync(value)
+        }
+
         // Handle Map
         if (value instanceof Map) {
             const entries = await Promise.all(
@@ -156,6 +161,11 @@ export function serializeSync(value: any): any {
         return { $t: "b", v: value.toString("base64") }
     }
 
+    // 处理 Error 类型（包括 name, message, stack, cause，cause 最多递归3层）
+    if (value instanceof Error) {
+        return serializeError(value, 0)
+    }
+
     // Handle Map
     if (value instanceof Map) {
         const entries = Array.from(value.entries()).map(([k, v]) => [serializeSync(k), serializeSync(v)])
@@ -214,6 +224,9 @@ export function deserialize(value: any): any {
                 case "s":
                     // Restore Set
                     return new Set(value["v"].map((v: any) => deserialize(v)))
+                case "e":
+                    // Restore Error
+                    return deserializeError(value)
                 case "b": {
                     const buf = Buffer.from(value["v"], "base64")
                     if (value["ct"]) {
@@ -259,4 +272,93 @@ export function deserialize(value: any): any {
     }
 
     return value
+}
+
+/**
+ * 序列化 Error 对象
+ * 支持 name, message, stack, cause（最多递归 3 层）
+ * @param error Error 对象
+ * @param depth 当前递归深度
+ * @returns 序列化后的对象
+ */
+function serializeError(error: Error, depth: number): any {
+    const result: any = {
+        $t: "e",
+        name: error.name,
+        message: error.message,
+    }
+    
+    // 只在有 stack 时存储
+    if (error.stack) {
+        result.stack = error.stack
+    }
+    
+    // 处理 cause，最多递归 3 层
+    if (error.cause !== undefined && depth < 3) {
+        if (error.cause instanceof Error) {
+            result.cause = serializeError(error.cause, depth + 1)
+        } else {
+            // cause 可能是任意值，使用 serializeSync 处理
+            result.cause = serializeSync(error.cause)
+        }
+    }
+    
+    return result
+}
+
+/**
+ * 反序列化 Error 对象
+ * @param value 序列化后的 Error 数据
+ * @returns Error 对象
+ */
+function deserializeError(value: any): Error {
+    // 根据 name 创建对应的 Error 类型
+    let error: Error
+    const message = value.message || ""
+    
+    switch (value.name) {
+        case "TypeError":
+            error = new TypeError(message)
+            break
+        case "RangeError":
+            error = new RangeError(message)
+            break
+        case "SyntaxError":
+            error = new SyntaxError(message)
+            break
+        case "ReferenceError":
+            error = new ReferenceError(message)
+            break
+        case "URIError":
+            error = new URIError(message)
+            break
+        case "EvalError":
+            error = new EvalError(message)
+            break
+        default:
+            error = new Error(message)
+            // 对于自定义 Error 类型，设置 name
+            if (value.name && value.name !== "Error") {
+                error.name = value.name
+            }
+            break
+    }
+    
+    // 恢复 stack
+    if (value.stack) {
+        error.stack = value.stack
+    }
+    
+    // 恢复 cause
+    if (value.cause !== undefined) {
+        if (value.cause && value.cause.$t === "e") {
+            // cause 是 Error
+            (error as any).cause = deserializeError(value.cause)
+        } else {
+            // cause 是其他值
+            (error as any).cause = deserialize(value.cause)
+        }
+    }
+    
+    return error
 }

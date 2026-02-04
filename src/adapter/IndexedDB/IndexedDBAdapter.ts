@@ -153,6 +153,11 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
         if (obj === null) return null
         if (typeof obj !== "object") return obj
 
+        // Error 类型需要特殊处理，IndexedDB 不支持直接存储 Error
+        if (obj instanceof Error) {
+            return this.serializeError(obj, 0)
+        }
+
         if (
             obj instanceof Map ||
             obj instanceof Set ||
@@ -182,6 +187,123 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
         return normalized
     }
 
+    /**
+     * 序列化 Error 对象以便存储到 IndexedDB
+     * 支持 name, message, stack, cause（最多递归 3 层）
+     */
+    private serializeError(error: Error, depth: number): any {
+        const result: any = {
+            __errorType: true,
+            name: error.name,
+            message: error.message,
+        }
+        
+        if (error.stack) {
+            result.stack = error.stack
+        }
+        
+        // 处理 cause，最多递归 3 层
+        if (error.cause !== undefined && depth < 3) {
+            if (error.cause instanceof Error) {
+                result.cause = this.serializeError(error.cause, depth + 1)
+            } else {
+                result.cause = this.normalizeUndefined(error.cause)
+            }
+        }
+        
+        return result
+    }
+
+    /**
+     * 反序列化 Error 对象
+     */
+    private deserializeError(data: any): Error {
+        const message = data.message || ""
+        let error: Error
+        
+        switch (data.name) {
+            case "TypeError":
+                error = new TypeError(message)
+                break
+            case "RangeError":
+                error = new RangeError(message)
+                break
+            case "SyntaxError":
+                error = new SyntaxError(message)
+                break
+            case "ReferenceError":
+                error = new ReferenceError(message)
+                break
+            case "URIError":
+                error = new URIError(message)
+                break
+            case "EvalError":
+                error = new EvalError(message)
+                break
+            default:
+                error = new Error(message)
+                if (data.name && data.name !== "Error") {
+                    error.name = data.name
+                }
+                break
+        }
+        
+        if (data.stack) {
+            error.stack = data.stack
+        }
+        
+        if (data.cause !== undefined) {
+            if (data.cause && data.cause.__errorType) {
+                (error as any).cause = this.deserializeError(data.cause)
+            } else {
+                (error as any).cause = this.restoreSpecialTypes(data.cause)
+            }
+        }
+        
+        return error
+    }
+
+    /**
+     * 恢复从 IndexedDB 取出的数据中的特殊类型（如 Error）
+     */
+    private restoreSpecialTypes(obj: any): any {
+        if (obj === null || obj === undefined) return obj
+        if (typeof obj !== "object") return obj
+
+        // 检测序列化的 Error
+        if (obj.__errorType === true) {
+            return this.deserializeError(obj)
+        }
+
+        if (Array.isArray(obj)) {
+            return obj.map((item) => this.restoreSpecialTypes(item))
+        }
+
+        // 不处理特殊类型（它们由 IndexedDB 原生支持）
+        if (
+            obj instanceof Map ||
+            obj instanceof Set ||
+            obj instanceof Date ||
+            obj instanceof RegExp ||
+            (typeof Blob !== "undefined" && obj instanceof Blob) ||
+            (typeof File !== "undefined" && obj instanceof File) ||
+            obj instanceof DataView ||
+            ArrayBuffer.isView(obj) ||
+            obj instanceof ArrayBuffer
+        ) {
+            return obj
+        }
+
+        const isPlain = obj.constructor === Object || obj.constructor === undefined
+        if (!isPlain) return obj
+
+        const restored: any = {}
+        for (const key in obj) {
+            restored[key] = this.restoreSpecialTypes(obj[key])
+        }
+        return restored
+    }
+
     // --- KV Operations ---
 
     async get(id: any): Promise<ITableDoc | void> {
@@ -190,8 +312,11 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
             const request = store.get(id)
             request.onerror = () => reject(request.error)
             request.onsuccess = () => {
-                const doc = request.result
-                if (doc) delete (doc as any)._id // 默认隐藏
+                let doc = request.result
+                if (doc) {
+                    delete (doc as any)._id // 默认隐藏
+                    doc = this.restoreSpecialTypes(doc) // 恢复特殊类型（如 Error）
+                }
                 resolve(doc)
             }
         })
@@ -538,7 +663,11 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
             request.onsuccess = (event: any) => {
                 const cursor = event.target.result
                 if (cursor) {
-                    if (matches(cursor.value, filter)) { if (callback(cursor.value) === false) { resolve(); return } }
+                    if (matches(cursor.value, filter)) {
+                        // 恢复特殊类型（如 Error）
+                        const restoredDoc = this.restoreSpecialTypes(cursor.value)
+                        if (callback(restoredDoc) === false) { resolve(); return }
+                    }
                     cursor.continue()
                 } else resolve()
             }

@@ -156,6 +156,11 @@ export function jsToMongo(data: any, parseFilter = false): any | Promise<any> {
         return { __type: "Set", val: values }
     }
 
+    // 处理 Error（包括 name, message, stack, cause，cause 最多递归3层）
+    if (data instanceof Error) {
+        return jsToMongoError(data, 0)
+    }
+
     // Fallback for other objects
     return jsToMongoObject(data, parseFilter, true)
 }
@@ -292,6 +297,10 @@ export function mongoToJs(data: any): ITableValue {
             const values = (val as any[]).map(v => mongoToJs(v))
             return new Set(values)
         }
+
+        if (__type === "Error") {
+            return mongoToJsError(data)
+        }
     }
 
     // 处理数组
@@ -305,4 +314,100 @@ export function mongoToJs(data: any): ITableValue {
         restoredObj[key] = mongoToJs(data[key])
     }
     return restoredObj
+}
+
+/**
+ * 将 Error 对象转换为 MongoDB 可存储格式
+ * 支持 name, message, stack, cause（最多递归 3 层）
+ * @param error Error 对象
+ * @param depth 当前递归深度
+ * @returns 序列化后的对象
+ */
+function jsToMongoError(error: Error, depth: number): any {
+    const result: any = {
+        __type: "Error",
+        name: error.name,
+        message: error.message,
+    }
+    
+    // 只在有 stack 时存储
+    if (error.stack) {
+        result.stack = error.stack
+    }
+    
+    // 处理 cause，最多递归 3 层
+    if (error.cause !== undefined && depth < 3) {
+        if (error.cause instanceof Error) {
+            result.cause = jsToMongoError(error.cause, depth + 1)
+        } else {
+            // cause 可能是任意值，使用 jsToMongo 处理
+            const causeVal = jsToMongo(error.cause, false)
+            if (causeVal instanceof Promise) {
+                return causeVal.then(resolved => {
+                    result.cause = resolved
+                    return result
+                })
+            }
+            result.cause = causeVal
+        }
+    }
+    
+    return result
+}
+
+/**
+ * 将 MongoDB 存储的 Error 数据还原为 Error 对象
+ * @param data MongoDB 中存储的 Error 数据
+ * @returns Error 对象
+ */
+function mongoToJsError(data: any): Error {
+    const message = data.message || ""
+    let error: Error
+    
+    // 根据 name 创建对应的 Error 类型
+    switch (data.name) {
+        case "TypeError":
+            error = new TypeError(message)
+            break
+        case "RangeError":
+            error = new RangeError(message)
+            break
+        case "SyntaxError":
+            error = new SyntaxError(message)
+            break
+        case "ReferenceError":
+            error = new ReferenceError(message)
+            break
+        case "URIError":
+            error = new URIError(message)
+            break
+        case "EvalError":
+            error = new EvalError(message)
+            break
+        default:
+            error = new Error(message)
+            // 对于自定义 Error 类型，设置 name
+            if (data.name && data.name !== "Error") {
+                error.name = data.name
+            }
+            break
+    }
+    
+    // 恢复 stack
+    if (data.stack) {
+        error.stack = data.stack
+    }
+    
+    // 恢复 cause
+    if (data.cause !== undefined) {
+        if (data.cause && data.cause.__type === "Error") {
+            // cause 是 Error
+            (error as any).cause = mongoToJsError(data.cause)
+        } else {
+            // cause 是其他值
+            (error as any).cause = mongoToJs(data.cause)
+        }
+    }
+    
+    return error
 }

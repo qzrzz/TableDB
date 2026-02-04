@@ -141,4 +141,80 @@ describe("MongoTableDocType 编解码测试", () => {
         let jsVal = await mongoToJs(mongoVal)
         expect(jsVal).toBe("550e8400-e29b-41d4-a716-446655440000")
     })
+
+    it("应正确处理 Error 基本类型", async () => {
+        const input = {
+            error: new Error("测试错误消息"),
+        }
+
+        const encoded = await jsToMongo(input)
+        
+        expect(encoded.error.__type).toBe("Error")
+        expect(encoded.error.name).toBe("Error")
+        expect(encoded.error.message).toBe("测试错误消息")
+
+        const decoded = (await mongoToJs(encoded)) as any
+        expect(decoded.error).toBeInstanceOf(Error)
+        expect(decoded.error.name).toBe("Error")
+        expect(decoded.error.message).toBe("测试错误消息")
+        expect(decoded.error.stack).toBeDefined()
+    })
+
+    it("应正确处理 TypeError", async () => {
+        const input = {
+            error: new TypeError("类型错误"),
+        }
+
+        const encoded = await jsToMongo(input)
+        const decoded = (await mongoToJs(encoded)) as any
+
+        expect(decoded.error).toBeInstanceOf(TypeError)
+        expect(decoded.error.name).toBe("TypeError")
+        expect(decoded.error.message).toBe("类型错误")
+    })
+
+    it("应正确处理带 cause 的 Error（3层嵌套）", async () => {
+        const cause3 = new Error("第三层原因")
+        const cause2 = new Error("第二层原因", { cause: cause3 })
+        const cause1 = new Error("第一层原因", { cause: cause2 })
+        const error = new Error("主错误", { cause: cause1 })
+
+        const input = { error }
+        const encoded = await jsToMongo(input)
+        const decoded = (await mongoToJs(encoded)) as any
+
+        const resultError = decoded.error
+        expect(resultError.message).toBe("主错误")
+        expect((resultError.cause as Error).message).toBe("第一层原因")
+        expect(((resultError.cause as Error).cause as Error).message).toBe("第二层原因")
+        expect((((resultError.cause as Error).cause as Error).cause as Error).message).toBe("第三层原因")
+    })
+
+    it("应正确处理 cause 超过3层时只保留前3层", async () => {
+        const cause4 = new Error("第四层原因")
+        const cause3 = new Error("第三层原因", { cause: cause4 })
+        const cause2 = new Error("第二层原因", { cause: cause3 })
+        const cause1 = new Error("第一层原因", { cause: cause2 })
+        const error = new Error("主错误", { cause: cause1 })
+
+        const input = { error }
+        const encoded = await jsToMongo(input)
+        const decoded = (await mongoToJs(encoded)) as any
+
+        const resultError = decoded.error
+        const level3 = ((resultError.cause as Error).cause as Error).cause as Error
+        expect(level3.message).toBe("第三层原因")
+        expect(level3.cause).toBeUndefined()
+    })
+
+    it("应正确处理 cause 为非 Error 类型", async () => {
+        const error = new Error("主错误", { cause: { code: 500, reason: "服务器错误" } })
+
+        const input = { error }
+        const encoded = await jsToMongo(input)
+        const decoded = (await mongoToJs(encoded)) as any
+
+        expect(decoded.error.message).toBe("主错误")
+        expect(decoded.error.cause).toEqual({ code: 500, reason: "服务器错误" })
+    })
 })
