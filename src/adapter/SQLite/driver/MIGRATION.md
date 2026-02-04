@@ -4,10 +4,11 @@
 
 ## 概述
 
-`SQLiteAdapter` 现在支持两种 SQLite 驱动：
+`SQLiteAdapter` 现在支持三种 SQLite 驱动：
 
-- **better-sqlite3** - 第三方高性能 SQLite 绑定（需要安装依赖）
-- **node:sqlite** - Node.js 22.5+ 内置模块（无需安装额外依赖）
+- **better-sqlite3** - 第三方高性能 SQLite 绑定（需要安装依赖，功能完整）
+- **node:sqlite** - Node.js 22.5+ 内置模块（无需安装额外依赖，功能完整）
+- **bun:sqlite** - Bun 内置模块（仅 Bun 运行时，不支持自定义函数）
 
 ## 快速使用
 
@@ -15,7 +16,8 @@
 import { SQLiteAdapter } from "tbdb"
 
 // 方式 1: 自动选择驱动（推荐）
-// 优先使用 better-sqlite3，不可用时自动切换到 node:sqlite
+// - Bun 环境：自动使用 bun:sqlite
+// - Node 环境：优先 better-sqlite3，不可用时退回 node:sqlite
 const adapter = SQLiteAdapter({
     filename: "data.db",
     driver: "auto"  // 默认值
@@ -32,6 +34,28 @@ const adapter3 = SQLiteAdapter({
     filename: "data.db",
     driver: "node:sqlite"
 })
+
+// 方式 4: 指定使用 bun:sqlite（仅 Bun 运行时）
+// 注意：bun:sqlite 不支持自定义函数，无法使用混合查询模式
+const adapter4 = SQLiteAdapter({
+    filename: "data.db",
+    driver: "bun:sqlite"
+})
+```
+
+## 自动选择逻辑
+
+当 `driver: "auto"` 时（默认值），驱动选择逻辑如下：
+
+1. **Bun 环境**：直接使用 `bun:sqlite`
+2. **Node 环境**：
+   - 优先使用环境变量 `TABLEDB_SQLITE_DRIVER` 指定的驱动
+   - 其次尝试 `better-sqlite3`
+   - 如果 `better-sqlite3` 不可用，退回 `node:sqlite`
+
+```bash
+# 通过环境变量指定驱动（Node 环境）
+TABLEDB_SQLITE_DRIVER=node:sqlite node app.js
 ```
 
 ## 配置选项
@@ -56,9 +80,10 @@ interface SQLiteAdapterConfig {
      * SQLite 驱动类型
      * - "better-sqlite3": 使用 better-sqlite3
      * - "node:sqlite": 使用 Node.js 内置模块
-     * - "auto": 自动选择（默认）
+     * - "bun:sqlite": 使用 Bun 内置模块（不支持自定义函数）
+     * - "auto": 自动选择（默认，优先 better-sqlite3 > node:sqlite）
      */
-    driver?: "better-sqlite3" | "node:sqlite" | "auto"
+    driver?: "better-sqlite3" | "node:sqlite" | "bun:sqlite" | "auto"
 }
 ```
 
@@ -75,21 +100,47 @@ if (isSqliteDriverAvailable("node:sqlite")) {
 if (isSqliteDriverAvailable("better-sqlite3")) {
     console.log("better-sqlite3 已安装")
 }
+
+if (isSqliteDriverAvailable("bun:sqlite")) {
+    console.log("bun:sqlite 可用（Bun 运行时）")
+}
 ```
 
 ## 兼容性矩阵
 
-| 功能 | better-sqlite3 | node:sqlite |
-|------|----------------|-------------|
-| 基本 CRUD | ✅ | ✅ |
-| MongoDB 风格查询 | ✅ | ✅ |
-| 事务 | ✅ | ✅ |
-| 自定义函数 | ✅ | ✅ |
-| 索引 | ✅ | ✅ |
-| 侧表优化 | ✅ | ✅ |
-| ZSTD 压缩 | ✅ | ✅ |
-| 最低 Node.js 版本 | 14+ | 22.5+ |
-| 需要安装依赖 | 是 | 否 |
+| 功能 | better-sqlite3 | node:sqlite | bun:sqlite |
+|------|----------------|-------------|------------|
+| 基本 CRUD | ✅ | ✅ | ✅ |
+| MongoDB 风格查询 | ✅ | ✅ | ✅ |
+| 事务 | ✅ | ✅ | ✅ |
+| 自定义函数 | ✅ | ✅ | ❌ |
+| 混合查询模式 (JsMatch/JsPatch) | ✅ | ✅ | ❌ |
+| 索引 | ✅ | ✅ | ✅ |
+| 侧表优化 | ✅ | ✅ | ✅ |
+| ZSTD 压缩 | ✅ | ✅ | ✅ |
+| 最低运行时版本 | Node.js 14+ | Node.js 22.5+ | Bun |
+| 需要安装依赖 | 是 | 否 | 否 |
+
+## bun:sqlite 限制说明
+
+⚠️ **重要**：`bun:sqlite` 不支持自定义 SQL 函数，这意味着：
+
+1. **无法使用混合查询模式**：JsMatch 和 JsPatch 函数无法注册
+2. **所有查询必须使用纯 SQL 模式**：复杂的 MongoDB 语义查询可能无法正确执行
+3. **自动选择不包含 bun:sqlite**：为避免功能受限，自动选择模式不会选择 bun:sqlite
+
+如需使用 `bun:sqlite`，请通过以下方式显式指定：
+
+```typescript
+// 方式 1: 代码中指定
+const adapter = SQLiteAdapter({
+    filename: "data.db",
+    driver: "bun:sqlite"
+})
+
+// 方式 2: 环境变量指定
+// TABLEDB_SQLITE_DRIVER=bun:sqlite
+```
 
 ## 高级用法：直接使用 Driver
 
@@ -101,6 +152,7 @@ import {
     createAutoSqliteDriver,
     BetterSqlite3Driver,
     NodeSqliteDriver,
+    BunSqliteDriver,
     type ISqliteDatabase
 } from "tbdb/adapter/SQLite"
 

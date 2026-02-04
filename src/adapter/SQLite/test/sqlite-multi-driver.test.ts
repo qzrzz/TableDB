@@ -241,7 +241,7 @@ describe("SQLiteAdapter 多驱动测试", () => {
                 const now = new Date()
                 await adapter.set("doc1", { id: "doc1", createdAt: now })
                 
-                const doc = await adapter.get("doc1")
+                const doc = await adapter.get("doc1") as any
                 expect(doc?.createdAt).toBeInstanceOf(Date)
                 expect(doc?.createdAt.getTime()).toBe(now.getTime())
             })
@@ -259,7 +259,7 @@ describe("SQLiteAdapter 多驱动测试", () => {
                     nested: { a: { b: { c: 123 } } }
                 })
                 
-                const doc = await adapter.get("doc1")
+                const doc = await adapter.get("doc1") as any
                 expect(doc?.nested.a.b.c).toBe(123)
             })
 

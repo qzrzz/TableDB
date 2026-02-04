@@ -21,7 +21,7 @@ try {
 } catch (e) {
     console.error("Cleanup error:", e)
 }
-
+ 
 const adapterNoIndex = SQLiteAdapter({ filename: DB_PATH })
 const adapterIndexed = SQLiteAdapter({ filename: DB_PATH_INDEXED })
 

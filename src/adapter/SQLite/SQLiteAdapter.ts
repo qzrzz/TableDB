@@ -89,10 +89,12 @@ export interface SQLiteAdapterConfig {
     zstd?: boolean
     /**
      * SQLite 驱动类型
-     * - "better-sqlite3": 使用 better-sqlite3（需要安装依赖，兼容性好）
-     * - "node:sqlite": 使用 Node.js 内置模块（Node.js 22.5+ 无需安装依赖）
-     * - "auto": 自动选择（优先 better-sqlite3，不可用时尝试 node:sqlite，遵守环境变量 TABLEDB_SQLITE_DRIVER）
+     * - "better-sqlite3": 使用 better-sqlite3（需要安装依赖，兼容性好，支持自定义函数）
+     * - "node:sqlite": 使用 Node.js 内置模块（Node.js 22.5+ 无需安装依赖，支持自定义函数）
+     * - "bun:sqlite": 使用 Bun 内置模块（仅 Bun 运行时，不支持自定义函数，无法使用混合查询模式）
+     * - "auto": 自动选择（Bun 环境用 bun:sqlite，Node 环境优先 better-sqlite3 > node:sqlite）
      *
+     * 注意：bun:sqlite 不支持自定义函数，因此无法使用 JsMatch/JsPatch 混合查询模式
      *
      * @default "auto"
      */
@@ -139,7 +141,17 @@ export function SQLiteAdapter(config: SQLiteAdapterConfig): ITableDBAdapter {
             }
 
             console.log(`[SQLiteAdapter] using driver: ${driverType}`)
-            registerCustomFunctions(db)
+            
+            // bun:sqlite 不支持自定义函数，跳过注册
+            if (driverType === "bun:sqlite") {
+                console.warn(
+                    "[SQLiteAdapter] bun:sqlite 不支持自定义函数，" +
+                    "将无法使用混合查询模式 (JsMatch/JsPatch)。" +
+                    "所有查询将强制使用纯 SQL 模式。"
+                )
+            } else {
+                registerCustomFunctions(db)
+            }
         }
         return db
     }
@@ -202,6 +214,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     // 脏字段缓存: path -> { hasArray: boolean; hasSpecial: boolean }
     // 用于指导查询分析器选择最佳策略
     private dirtyFieldCache = new Map<string, { hasArray: boolean; hasSpecial: boolean }>()
+    // 是否支持自定义函数（JsMatch/JsPatch）
+    // bun:sqlite 不支持，因此需要强制使用纯 SQL 模式
+    private supportsCustomFunctions: boolean
 
     constructor(
         private db: ISqliteDatabase,
@@ -209,6 +224,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         private config: SQLiteAdapterConfig,
         private driverType: SqliteDriverType = "better-sqlite3"
     ) {
+        // bun:sqlite 不支持自定义函数
+        this.supportsCustomFunctions = driverType !== "bun:sqlite"
+        
         // 1. 确保存储表存在
         this.getStatement(
             `
@@ -252,6 +270,20 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         } catch (e) {
             // 忽略表不存在错误（理论上不会发生）
         }
+    }
+
+    /**
+     * 检查查询是否可以使用纯 SQL 模式
+     * 
+     * 如果当前驱动不支持自定义函数（如 bun:sqlite），则强制返回 true，
+     * 使用纯 SQL 模式（可能会有语义差异，但至少不会报错）
+     */
+    private isQueryCompatible(filter: ITableFilter): boolean {
+        // 如果不支持自定义函数，强制使用纯 SQL 模式
+        if (!this.supportsCustomFunctions) {
+            return true
+        }
+        return isQuerySqlCompatible(filter, this.dirtyFieldCache)
     }
 
     private markFieldDirty(path: string, type: "array" | "special") {
@@ -451,7 +483,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             { indexedFields: this.indexedFields, tableName: this.tableName } as any,
             this.dirtyFieldCache
         )
-        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
+        const isCompatible = this.isQueryCompatible(filter)
 
         let sql = ""
         let params = q.params
@@ -544,12 +576,16 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         // 策略分析 (Strategy Analysis)
         if (debug) {
             const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
-            isCompatible = analysis.compatible
+            // 如果不支持自定义函数，强制使用 SQL 模式
+            isCompatible = this.supportsCustomFunctions ? analysis.compatible : true
             options!.debug!.strategy = isCompatible ? "SQL" : "HYBRID"
             options!.debug!.dirtyReasons = analysis.reasons
+            if (!this.supportsCustomFunctions && !analysis.compatible) {
+                options!.debug!.dirtyReasons.push({ path: "*", reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式" })
+            }
             debug.setPrepareTime()
         } else {
-            isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
+            isCompatible = this.isQueryCompatible(filter)
         }
 
         let sql = ""
@@ -649,7 +685,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         if (debug) {
             const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
             options!.debug!.dirtyReasons = analysis.reasons
-            options!.debug!.strategy = analysis.compatible ? "SQL" : "HYBRID"
+            const strategyCompatible = this.supportsCustomFunctions ? analysis.compatible : true
+            options!.debug!.strategy = strategyCompatible ? "SQL" : "HYBRID"
+            if (!this.supportsCustomFunctions && !analysis.compatible) {
+                options!.debug!.dirtyReasons.push({ path: "*", reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式" })
+            }
         }
 
         const q = await mongoToSql(
@@ -657,7 +697,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any,
             this.dirtyFieldCache
         )
-        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
+        const isCompatible = this.isQueryCompatible(filter)
 
         let selectSql = ""
         let params = q.params
@@ -832,7 +872,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             )
 
             q.limit = 1
-            const isCompatible = isQuerySqlCompatible(item.filter, this.dirtyFieldCache)
+            const isCompatible = this.isQueryCompatible(item.filter)
             let selectSql = ""
             let params = q.params
 
@@ -904,30 +944,70 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         // 2. 执行阶段 (事务中)
         const bulkUpdateTx = this.db.transaction(() => {
             const insertStmt = this.getStatement(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
-            const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`)
+            
+            // 根据是否支持自定义函数选择不同的更新策略
+            if (this.supportsCustomFunctions) {
+                // 使用 JsPatch 进行高效的 SQL 内更新
+                const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`)
 
-            for (const prepared of preparedUpdates) {
-                try {
-                    const row = this.getStatement(prepared.selectSql).get(...prepared.params)
-                    if (row) {
-                        // 包含匹配行 -> Update
-                        updateStmt.run(prepared.sOp, (row as any)._id)
-                        matchedCount++
-                        modifiedCount++
-                    } else if (prepared.options?.upsert && prepared.sUpsertDoc && prepared.upsertId) {
-                        // 无匹配行且启用了 Upsert -> Insert
-                        try {
-                            // 尝试插入 (可能因并发导致 id 冲突，这里简化处理)
-                            insertStmt.run(prepared.upsertId, prepared.sUpsertDoc)
-                            upsertedIds.push(prepared.upsertId)
-                            matchedCount++ // Upsert 通常不算 matchedCount ? Mongo 标准: matched=0, upserted=1
+                for (const prepared of preparedUpdates) {
+                    try {
+                        const row = this.getStatement(prepared.selectSql).get(...prepared.params)
+                        if (row) {
+                            // 包含匹配行 -> Update
+                            updateStmt.run(prepared.sOp, (row as any)._id)
+                            matchedCount++
                             modifiedCount++
-                        } catch (insertErr) {
-                            // 忽略插入错误 (例如 ID 冲突)
+                        } else if (prepared.options?.upsert && prepared.sUpsertDoc && prepared.upsertId) {
+                            // 无匹配行且启用了 Upsert -> Insert
+                            try {
+                                insertStmt.run(prepared.upsertId, prepared.sUpsertDoc)
+                                upsertedIds.push(prepared.upsertId)
+                                matchedCount++
+                                modifiedCount++
+                            } catch (insertErr) {
+                                // 忽略插入错误 (例如 ID 冲突)
+                            }
                         }
+                    } catch (e) {
+                        console.error("bulkUpdateSync error:", e)
                     }
-                } catch (e) {
-                    console.error("bulkUpdateSync error:", e)
+                }
+            } else {
+                // bun:sqlite 不支持 JsPatch，使用读取-修改-写回模式
+                const selectDataStmt = this.getStatement(`SELECT _id, data FROM "${this.tableName}" WHERE _id = ?`)
+                const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = ? WHERE _id = ?`)
+
+                for (const prepared of preparedUpdates) {
+                    try {
+                        const row = this.getStatement(prepared.selectSql).get(...prepared.params)
+                        if (row) {
+                            // 读取完整数据
+                            const fullRow = selectDataStmt.get((row as any)._id) as { _id: number; data: string }
+                            if (fullRow) {
+                                // 在内存中应用更新
+                                const doc = fastDeserialize(fullRow.data)
+                                const modified = applyUpdate(doc, prepared.normalizedOp)
+                                if (modified) {
+                                    const sDoc = JSON.stringify(serializeSync(doc))
+                                    updateStmt.run(sDoc, fullRow._id)
+                                }
+                                matchedCount++
+                                modifiedCount++
+                            }
+                        } else if (prepared.options?.upsert && prepared.sUpsertDoc && prepared.upsertId) {
+                            try {
+                                insertStmt.run(prepared.upsertId, prepared.sUpsertDoc)
+                                upsertedIds.push(prepared.upsertId)
+                                matchedCount++
+                                modifiedCount++
+                            } catch (insertErr) {
+                                // 忽略插入错误
+                            }
+                        }
+                    } catch (e) {
+                        console.error("bulkUpdateSync error:", e)
+                    }
                 }
             }
         })
@@ -954,7 +1034,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         if (debug) {
             const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
             options!.debug!.dirtyReasons = analysis.reasons
-            options!.debug!.strategy = analysis.compatible ? "SQL" : "HYBRID"
+            const strategyCompatible = this.supportsCustomFunctions ? analysis.compatible : true
+            options!.debug!.strategy = strategyCompatible ? "SQL" : "HYBRID"
+            if (!this.supportsCustomFunctions && !analysis.compatible) {
+                options!.debug!.dirtyReasons.push({ path: "*", reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式" })
+            }
         }
 
         const q = await mongoToSql(
@@ -964,7 +1048,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         )
         q.limit = 1
 
-        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
+        const isCompatible = this.isQueryCompatible(filter)
 
         let selectSql = ""
         let params = q.params
@@ -1261,7 +1345,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         if (debug) {
             const analysis = analyzeQueryCompatibility(filter, this.dirtyFieldCache)
             options!.debug!.dirtyReasons = analysis.reasons
-            options!.debug!.strategy = analysis.compatible ? "SQL" : "HYBRID"
+            const strategyCompatible = this.supportsCustomFunctions ? analysis.compatible : true
+            options!.debug!.strategy = strategyCompatible ? "SQL" : "HYBRID"
+            if (!this.supportsCustomFunctions && !analysis.compatible) {
+                options!.debug!.dirtyReasons.push({ path: "*", reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式" })
+            }
         }
 
         const q = await mongoToSql(
@@ -1269,7 +1357,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any,
             this.dirtyFieldCache
         )
-        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
+        const isCompatible = this.isQueryCompatible(filter)
 
         let sql = ""
         let params = q.params
@@ -1313,7 +1401,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             { ...options, limit: 1, indexedFields: this.indexedFields, tableName: this.tableName } as any,
             this.dirtyFieldCache
         )
-        const isCompatible = isQuerySqlCompatible(filter, this.dirtyFieldCache)
+        const isCompatible = this.isQueryCompatible(filter)
 
         let selectSql = ""
         let params = q.params

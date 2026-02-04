@@ -47,10 +47,10 @@ export class BetterSqlite3Driver implements ISqliteDatabase {
 
     constructor(config: ISqliteDriverConfig) {
         // 动态导入 better-sqlite3（避免在不需要时加载）
-        // better-sqlite3 导出的是一个类构造函数，不是 { default: ... }
+        // better-sqlite3 导出的是一个类构造函数
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const require = createRequire(import.meta.url)
-        const BetterSqlite3 = require("better-sqlite3") as typeof import("better-sqlite3").default
+        const BetterSqlite3 = require("better-sqlite3") as typeof import("better-sqlite3")
         this.db = new BetterSqlite3(config.filename)
 
         // 配置 WAL 模式
@@ -87,7 +87,7 @@ export class BetterSqlite3Driver implements ISqliteDatabase {
     }
 
     transaction<T extends (...args: any[]) => any>(fn: T): ISqliteTransactionFn<T> {
-        return this.db.transaction(fn) as ISqliteTransactionFn<T>
+        return this.db.transaction(fn) as unknown as ISqliteTransactionFn<T>
     }
 
     checkpoint(mode: "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE" = "TRUNCATE"): void {

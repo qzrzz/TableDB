@@ -115,4 +115,4 @@ export interface ISqliteDriverConfig {
 /**
  * SQLite Driver 类型枚举
  */
-export type SqliteDriverType = "better-sqlite3" | "node:sqlite"
+export type SqliteDriverType = "better-sqlite3" | "node:sqlite" | "bun:sqlite"
