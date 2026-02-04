@@ -1,6 +1,8 @@
 import { createBenchTable } from "./utils"
 import { readableMs, stopwatch } from "fzz"
 
+process.env.TABLEDB_SQLITE_DRIVER = "node:sqlite"
+
 let table = await createBenchTable("base_try_table", false)
 
 console.log("简单测试", table.adapter.name)

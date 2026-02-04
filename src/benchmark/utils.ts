@@ -18,7 +18,7 @@ export interface IBenchDoc extends ITableDoc {
 export async function createBenchTable(name: string, enableMarkDelete: boolean = false) {
     //删除测试数据库文件
     try {
-        fs.unlinkSync("./dist/test_tabledb.db")
+        if (fs.existsSync("./dist/test_tabledb.db")) fs.unlinkSync("./dist/test_tabledb.db")
     } catch (e) {
         console.warn(e)
     }

@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, renameSync, unlinkSync } from "fs"
 import { resolve } from "path"
-import { Database } from "better-sqlite3"
 import { compress, decompress } from "zstd-napi"
 import { writeFileSync } from "fs"
+import type { ISqliteDatabase } from "../driver/types"
 
 /**
  * 检查文件是否为 ZSTD 压缩文件 (Magic Number: 0xFD2FB528)
@@ -50,9 +50,9 @@ export function checkAndDecompressDb(filename: string): void {
     }
 }
 
-export function prepareForCompression(db: Database) {
-    if (db && db.open) {
-        db.pragma("wal_checkpoint(TRUNCATE)")
+export function prepareForCompression(db: ISqliteDatabase) {
+    if (db && db.isOpen) {
+        db.checkpoint("TRUNCATE")
     }
 }
 
