@@ -16,9 +16,8 @@
         "build": "rslib build",
         "dev": "rslib build --watch",
         "test": "vitest",
-        "docs:dev": "vitepress dev docs",
-        "docs:build": "vitepress build docs",
-        "docs:preview": "vitepress preview docs"
+        "docs:dev": "starmap ",
+        "docs:build": "starmap build"
     },
     "devDependencies": {
         "@fontsource/jetbrains-mono": "5.2.8",
@@ -29,8 +28,7 @@
         "fake-indexeddb": "6.2.5",
         "fs-extra": "11.3.3",
         "tinybench": "6.0.0",
-        "typescript": "^5.9.3",
-        "vitepress": "2.0.0-alpha.15"
+        "typescript": "^5.9.3"
     },
     "dependencies": {
         "@fontsource/google-sans-code": "5.2.3",

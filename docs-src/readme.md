@@ -1,30 +1,30 @@
-<img src="./logo/tbdb-logo.png" alt="TableDB Logo" height="111"/>
+# 教程
 
-# TableDB
+![](./logo/tbdb-logo.png)
 
 > 这个世界上复杂的数据库和 ORM 已经够多了，而我们只想简单地存个东西。
 
 一个非常简单却实用的 NoSQL 数据库抽象层，提供类似 MongoDB 的增删改查 API，支持多种存储后端（SQLite, MongoDB）。
 
--   **完全 JavaScript 数据类型**\
-     直接存入 `Date`, `Map`, `RegExp`, `ArrayBuffer`,`Unint8Array`, `Blob`, `File` 等 JavaScript 类型，取出后数据类型不变，不用额外考虑数据库类型问题。
--   **类似 MongoDB 的 NoSQL API**\
-     增删改查的接口遵照 MongoDB 设计，例如 `findOne()`, `updateMany()`，易于上手，可以平滑的从 MongoDB 迁移。
--   **切换不同数据库后端**\
-     提供 SQLite, MongoDB 等多种数据库适配器，可以方便的切换不同的数据库存储后端。
-    并且可以在不同数据库间迁移数据，让你可以从 SQLite 开始，当规模变大时迁移到 MongoDB。
+- **完全 JavaScript 数据类型**\
+   直接存入 `Date`, `Map`, `RegExp`, `ArrayBuffer`,`Unint8Array`, `Blob`, `File` 等 JavaScript 类型，取出后数据类型不变，不用额外考虑数据库类型问题。
+- **类似 MongoDB 的 NoSQL API**\
+   增删改查的接口遵照 MongoDB 设计，例如 `findOne()`, `updateMany()`，易于上手，可以平滑的从 MongoDB 迁移。
+- **切换不同数据库后端**\
+   提供 SQLite, MongoDB 等多种数据库适配器，可以方便的切换不同的数据库存储后端。
+  并且可以在不同数据库间迁移数据，让你可以从 SQLite 开始，当规模变大时迁移到 MongoDB。
 
--   **集成实用方法**\
-    内置 “分页”、“游标分页”、“批量遍历”等实用功能。
+- **集成实用方法**\
+  内置 “分页”、“游标分页”、“批量遍历”等实用功能。
 
--   **可选功能**：
-    -   `autoMetadata` 自动元数据（创建时间，修改时间）
-    -   `markDelete` 标记删除
-    -   `tree` 目录树存储
+- **可选功能**：
+    - `autoMetadata` 自动元数据（创建时间，修改时间）
+    - `markDelete` 标记删除
+    - `tree` 目录树存储
 
 ## 使用场景
 
-如果你的应用
+ 
 
 ## 安装
 
@@ -62,9 +62,9 @@ let members = await memberTable.findMany({ age: { $gt: 20 } })
 
 ## 项目目录结构
 
--   接口定义：`./core/types.ts`, `./adapter/adapter.ts`
--   核心实现：`./core/Table.ts`
--   适配器实现：`./adapter/`
+- 接口定义：`./core/types.ts`, `./adapter/adapter.ts`
+- 核心实现：`./core/Table.ts`
+- 适配器实现：`./adapter/`
 
 ## 使用
 
@@ -78,10 +78,10 @@ Table 使用分为 2 个步骤，所有配置的工作都集中在定义的阶�
 
 Table 的定义主要是配置：
 
--   在数据库中的表名（`name`）
--   文档类型定义（`schema`）
--   使用什么数据库实现（`adapter`）
--   其他功能扩展的配置（如 `enableMarkDelete`）
+- 在数据库中的表名（`name`）
+- 文档类型定义（`schema`）
+- 使用什么数据库实现（`adapter`）
+- 其他功能扩展的配置（如 `enableMarkDelete`）
 
 ### 定义 Schema
 
@@ -105,7 +105,7 @@ class UserSchema {
 
 我们可以使用 `defineTable` 来定义一个 `useTable` 函数
 
-```ts
+```ts @full
 import { defineTable, SQLiteAdapter } from "tbdb"
 
 let useUserTable = defineTable({
@@ -167,9 +167,9 @@ let userTable = await useUserTable({
 
 ### 增加文档
 
--   `insertOne(doc)` 插入单个新文档
--   `insertMany(docs)` 插入多个新文档
--   `setMany(docs)` 批量设置文档（有则更新，无则插入）
+- `insertOne(doc)` 插入单个新文档
+- `insertMany(docs)` 插入多个新文档
+- `setMany(docs)` 批量设置文档（有则更新，无则插入）
 
 ```ts
 let userTable = await useUserTable()
@@ -185,8 +185,8 @@ await userTable.insertMany([
 
 ### 查询文档
 
--   `findOne(filter)` 查找一个符合 `filter` 的文档
--   `findMany(filter, options)` 查找全部符合 `filter` 的文档
+- `findOne(filter)` 查找一个符合 `filter` 的文档
+- `findMany(filter, options)` 查找全部符合 `filter` 的文档
 
 ```ts
 let userTable = await useUserTable()
@@ -196,8 +196,8 @@ let users: UserSchema[] = await userTable.findMany({ age: { $gt: 20 } })
 
 ### 删除文档
 
--   `deleteOne(filter)` 删除一个符合 `filter` 的文档
--   `deleteMany(filter)` 删除多个符合 `filter` 的文档
+- `deleteOne(filter)` 删除一个符合 `filter` 的文档
+- `deleteMany(filter)` 删除多个符合 `filter` 的文档
 
 ```ts
 let userTable = await useUserTable()
@@ -206,10 +206,10 @@ await userTable.deleteMany({ id: { $in: ["id1", "id2"] } })
 
 ### 更新文档
 
--   `updateOne(filter, update)` 更新一个符合 `filter` 的文档
--   `updateMany(filter, update)` 更新多个符合 `filter` 的文档
--   `bulkUpdate(updates:{ filter, update }[])` 批量更新文档
--   `setMany(docs)` 批量设置文档（有则更新，无则插入）
+- `updateOne(filter, update)` 更新一个符合 `filter` 的文档
+- `updateMany(filter, update)` 更新多个符合 `filter` 的文档
+- `bulkUpdate(updates:{ filter, update }[])` 批量更新文档
+- `setMany(docs)` 批量设置文档（有则更新，无则插入）
 
 ```ts
 let userTable = await useUserTable()
@@ -218,12 +218,12 @@ await userTable.updateMany({ age: { $lt: 18 } }, { $set: { isMinor: true } })
 
 ### 遍历文件
 
--   `forEach(filter, callback)` 遍历符合 `filter` 的文档，逐个文档执行 `callback`，适合少量数据
--   `eachBatch(filter, options, callback)` 遍历符合 `filter` 的文档，一批文档执行 `callback`，适合大量数据
+- `forEach(filter, callback)` 遍历符合 `filter` 的文档，逐个文档执行 `callback`，适合少量数据
+- `eachBatch(filter, options, callback)` 遍历符合 `filter` 的文档，一批文档执行 `callback`，适合大量数据
 
--   `listPaging(filter, options)` 使用分页列出符合 `filter` 的文档，适合要求分页并且要跳转到指定页的场景，但性能较低
+- `listPaging(filter, options)` 使用分页列出符合 `filter` 的文档，适合要求分页并且要跳转到指定页的场景，但性能较低
 
--   `listPagingByCursor(filter, options)` 使用游标分页列出符合 `filter` 的文档，高性能但无法跳转指定页，适合大量数据
+- `listPagingByCursor(filter, options)` 使用游标分页列出符合 `filter` 的文档，高性能但无法跳转指定页，适合大量数据
 
 ## 数据类型
 
@@ -232,9 +232,9 @@ TableDB 的设计目标是与 JavaScript 保持一致的类型存储，
 
 支持数据类型：
 
--   `string`, `number`, `boolean`, `null`, `undefined`, `Date`, `Map`, `Set`, `bigint`
--   `Blob`, `File`, `ArrayBuffer`
--   `Int8Array`, `Int16Array`, `Int32Array`, `Uint8Array`, `Uint8ClampedArray`, `Uint16Array`, `Uint32Array`, `Float32Array`, `Float64Array`, `BigInt64Array`, `BigUint64Array`
+- `string`, `number`, `boolean`, `null`, `undefined`, `Date`, `Map`, `Set`, `bigint`
+- `Blob`, `File`, `ArrayBuffer`
+- `Int8Array`, `Int16Array`, `Int32Array`, `Uint8Array`, `Uint8ClampedArray`, `Uint16Array`, `Uint32Array`, `Float32Array`, `Float64Array`, `BigInt64Array`, `BigUint64Array`
 
 #### `undefined` 与 `null`
 
@@ -242,24 +242,21 @@ TableDB 中 `undefined` 和 `null` 的处理与 MongoDB 保持一致。也就是
 
 查询行为：
 
--   相等查询 `{ key: null }`
+- 相等查询 `{ key: null }`
+    - 匹配 `key` 字段值为 `null` 的文档
+    - 同时也匹配不包含 `key` 字段的文档（缺失字段被视为 `null`）
 
-    -   匹配 `key` 字段值为 `null` 的文档
-    -   同时也匹配不包含 `key` 字段的文档（缺失字段被视为 `null`）
+- 不等查询 `{ key: { $ne: null } }`
+    - 仅匹配 `key` 字段存在且值不为非 `null` 的文档
+    - 不匹配缺失 `key` 字段的文档
 
--   不等查询 `{ key: { $ne: null } }`
+- 存在性查询 `{ key: { $exists: false } }`
+    - 匹配 `key` 字段存在且值不为 null 的文档
+    - 不匹配缺失 `key` 字段的文档
 
-    -   仅匹配 `key` 字段存在且值不为非 `null` 的文档
-    -   不匹配缺失 `key` 字段的文档
-
--   存在性查询 `{ key: { $exists: false } }`
-
-    -   匹配 `key` 字段存在且值不为 null 的文档
-    -   不匹配缺失 `key` 字段的文档
-
--   精确匹配 `null` `{ key: { $type: 10 } }` （SQLite 不支持）
-    -   仅匹配 `key` 字段存在且值为 `null` 的文档 (10 是 BSON Null 类型码)
-    -   不匹配缺失 `key` 字段的文档
+- 精确匹配 `null` `{ key: { $type: 10 } }` （SQLite 不支持）
+    - 仅匹配 `key` 字段存在且值为 `null` 的文档 (10 是 BSON Null 类型码)
+    - 不匹配缺失 `key` 字段的文档
 
 所以简单来说，用 `null` 来代替 `undefined`，用 `val == null` 或者来判断类型，用 `null` 来匹配。
 
@@ -267,9 +264,9 @@ TableDB 中 `undefined` 和 `null` 的处理与 MongoDB 保持一致。也就是
 
 TableDB 支持类似 MongoDB 的查询和更新的操作符，主要分为 3 种
 
--   `filter`：查询过滤器，用于指定查询条件
--   `updateOp`：更新命令，用于指定更新操作
--   `mergeDoc`： 合并文档，覆盖式设置文档内容
+- `filter`：查询过滤器，用于指定查询条件
+- `updateOp`：更新命令，用于指定更新操作
+- `mergeDoc`： 合并文档，覆盖式设置文档内容
 
 ### `filter`
 
@@ -300,10 +297,10 @@ table.findMany({ "ob.b": 2 })
 
 #### 逻辑组合
 
--   `$and: [ filter1, filter2, ... ]`：与逻辑，所有子条件都必须满足
--   `$or: [ filter1, filter2, ... ]`：或逻辑
--   `$nor: [ filter1, filter2, ... ]`： 非或逻辑，所有子条件都不满足
--   `$not : match`：非逻辑，条件不满足
+- `$and: [ filter1, filter2, ... ]`：与逻辑，所有子条件都必须满足
+- `$or: [ filter1, filter2, ... ]`：或逻辑
+- `$nor: [ filter1, filter2, ... ]`： 非或逻辑，所有子条件都不满足
+- `$not : match`：非逻辑，条件不满足
 
 ```ts
 // 匹配 status 为 "active" 且 age 大于等于 18 的文档
@@ -318,12 +315,12 @@ table.findMany({ isDeleted: { $not: { $exists: true } } })
 
 #### 值比较
 
--   `$eq: value`：等于
--   `$ne: value`：不等于
--   `$gt: value`：大于
--   `$gte: value`：大于等于
--   `$lt: value`：小于
--   `$lte: value`：小于等于
+- `$eq: value`：等于
+- `$ne: value`：不等于
+- `$gt: value`：大于
+- `$gte: value`：大于等于
+- `$lt: value`：小于
+- `$lte: value`：小于等于
 
 ```ts
 // 匹配 age 大于等于 18 且小于等于 60
@@ -336,11 +333,11 @@ table.findMany({ createdAt: { $gt: new Date("2023-01-01") } })
 
 #### 数组/集合运算
 
--   `$in: [value1, value2, ...]`：包含于数组
--   `$nin: [value1, value2, ...]`：不包含于数组
--   `$all: [value1, value2, ...]`：包含所有数组元素
--   `$elemMatch: filter`：数组元素匹配，对数组字段使用，表示数组中至少有一个元素满足子条件
--   `$size: number`：数组大小匹配，对数组字段使用，表示数组的长度
+- `$in: [value1, value2, ...]`：包含于数组
+- `$nin: [value1, value2, ...]`：不包含于数组
+- `$all: [value1, value2, ...]`：包含所有数组元素
+- `$elemMatch: filter`：数组元素匹配，对数组字段使用，表示数组中至少有一个元素满足子条件
+- `$size: number`：数组大小匹配，对数组字段使用，表示数组的长度
 
 ```ts
 // 匹配 id 在指定列表中的文档
@@ -363,7 +360,7 @@ table.findMany({ "tags.10": { $exists: true } })
 
 #### 存在性检查
 
--   `$exists: boolean`：字段是否存在
+- `$exists: boolean`：字段是否存在
 
 ```ts
 // 匹配包含 email 字段的文档
@@ -374,8 +371,8 @@ table.findMany({ "a.b.c": { $exists: false } })
 
 #### 文本匹配
 
--   `$regex: regex`：正则表达式匹配
--   `$like: pattern`：SQL LIKE 模式匹配，支持 `%`（匹配任意字符序列）和 `_`（匹配单个字符）
+- `$regex: regex`：正则表达式匹配
+- `$like: pattern`：SQL LIKE 模式匹配，支持 `%`（匹配任意字符序列）和 `_`（匹配单个字符）
 
 ```ts
 // 使用正则表达式匹配 name 以 "A" 开头的文档
@@ -399,7 +396,7 @@ table.updateMany(
     // filter
     { id: "docId" },
     // updateOp
-    { $set: { name: "newName", age: 30 } }
+    { $set: { name: "newName", age: 30 } },
 )
 ```
 
@@ -410,16 +407,16 @@ table.updateMany(
     { id: "docId" },
     {
         $set: { "address.city": "NewCity" },
-    }
+    },
 )
 ```
 
 #### 字段更新操作
 
--   `$set: { key: value, ... }`：设置字段值
--   `$unset: { key: 1, ... }`：删除字段
--   `$setOnInsert: { key: value, ... }`：仅在插入新文档时设置字段值
--   `$rename: { oldKey: newKey, ... }`：重命名字段
+- `$set: { key: value, ... }`：设置字段值
+- `$unset: { key: 1, ... }`：删除字段
+- `$setOnInsert: { key: value, ... }`：仅在插入新文档时设置字段值
+- `$rename: { oldKey: newKey, ... }`：重命名字段
 
 ```ts
 // 设置字段值
@@ -446,10 +443,10 @@ table.updateOne({ id: "doc1" }, { $rename: { food: "foodNew" } })
 
 #### 数字运算
 
--   `$inc: { key: number, ... }`：增加字段数字值（减法使用负数）
--   `$mul: { key: number, ... }`：乘字段数字值
--   `$min: { key: number, ... }`：将字段值更新为指定值和当前值中的较小值
--   `$max: { key: number, ... }`：将字段值更新为指定值和当前值中的较大值
+- `$inc: { key: number, ... }`：增加字段数字值（减法使用负数）
+- `$mul: { key: number, ... }`：乘字段数字值
+- `$min: { key: number, ... }`：将字段值更新为指定值和当前值中的较小值
+- `$max: { key: number, ... }`：将字段值更新为指定值和当前值中的较大值
 
 ```ts
 // 给 count 字段增加 1
@@ -466,10 +463,10 @@ table.updateOne({ id: "doc1" }, { $max: { rating: 100 } })
 
 #### 数组/集合更新
 
--   `$push: { key: value | { $each: [values], $position?, $slice?, $sort? } }`：向数组字段添加元素
--   `$addToSet: { key: value | { $each: [values] } }`：向数组字段添加唯一元素
--   `$pop: { key: 1 | -1 }`：移除数组字段最后一个元素或者第一个元素
--   `$pull: { key: value | filter }`：从数组字段移除匹配值或条件的元素
+- `$push: { key: value | { $each: [values], $position?, $slice?, $sort? } }`：向数组字段添加元素
+- `$addToSet: { key: value | { $each: [values] } }`：向数组字段添加唯一元素
+- `$pop: { key: 1 | -1 }`：移除数组字段最后一个元素或者第一个元素
+- `$pull: { key: value | filter }`：从数组字段移除匹配值或条件的元素
 
 注意 `$addToSet` 用在比较复杂类型（对象、数组）时，唯一性判断是深度比较，也就是说对象和数字会深度比较子级。
 
@@ -500,15 +497,15 @@ table.updateOne({ id: "doc1" }, { $pull: { scores: { $gte: 90 } } })
 
 根据 `setMany(docs)` 的参数有 3 种覆盖方式：
 
--   `default` （默认）：浅覆盖（`Object.assign`）\
-     传入的每个文档会与数据库中已有的文档进行浅覆盖，相当于：`Object.assign(oldDoc, newDoc)`。
+- `default` （默认）：浅覆盖（`Object.assign`）\
+   传入的每个文档会与数据库中已有的文档进行浅覆盖，相当于：`Object.assign(oldDoc, newDoc)`。
 
--   `overwrite`：完全覆盖\
-     传入的每个文档会完全覆盖数据库中已有的文档，相当于：`oldDoc = newDoc`。
+- `overwrite`：完全覆盖\
+   传入的每个文档会完全覆盖数据库中已有的文档，相当于：`oldDoc = newDoc`。
 
--   `merge`：深度合并\
-     传入的每个文档会与数据库中已有的文档进行深度合并。\
-     **如果字段是数组，则进行集合合并**（类似于 `$addToSet` 操作）。
+- `merge`：深度合并\
+   传入的每个文档会与数据库中已有的文档进行深度合并。\
+   **如果字段是数组，则进行集合合并**（类似于 `$addToSet` 操作）。
 
 #### 默认进行浅合并
 
