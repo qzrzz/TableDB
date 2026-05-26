@@ -5,4 +5,4 @@ import type { TableTree } from "../TableTree"
  * @desc  
  * @this TableTree
  */
-export function createNodes(this: typeof TableTree, nodes: any[]) {}
+export function createNodes(this: InstanceType<typeof TableTree>, nodes: any[]) {}

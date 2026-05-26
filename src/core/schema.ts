@@ -34,7 +34,7 @@ export async function __schema_init(this: Table): Promise<void> {
             }
 
             if (item.meta?.isUUID) {
-                this.__schema_hints.UUIDPaths.push(item.paths)
+                schemaHits.UUIDPaths.push(item.paths)
             }
         })
     }

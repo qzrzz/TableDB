@@ -9,7 +9,7 @@
         "@fontsource/inter": "5.2.8",
         "better-sqlite3": "12.6.0",
         "es-toolkit": "1.43.0",
-        "fzz": "*",
+        "fzz": "3.1.9",
         "mongodb": "7.0.0",
         "vitest": "4.0.16",
         "zstd-napi": "0.0.12",
@@ -23,7 +23,7 @@
         "fake-indexeddb": "6.2.5",
         "fs-extra": "11.3.3",
         "tinybench": "6.0.0",
-        "typescript": "^5.9.3",
+        "typescript": "^6.0.3",
       },
     },
   },
@@ -230,6 +230,8 @@
 
     "@types/chai": ["@types/chai@5.2.3", "https://registry.npmmirror.com/@types/chai/-/chai-5.2.3.tgz", { "dependencies": { "@types/deep-eql": "*", "assertion-error": "^2.0.1" } }, "sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA=="],
 
+    "@types/crypto-js": ["@types/crypto-js@4.2.2", "https://registry.npmmirror.com/@types/crypto-js/-/crypto-js-4.2.2.tgz", {}, "sha512-sDOLlVbHhXpAUAL0YHDUUwDZf3iN4Bwi4W6a0W0b+QcAezUbRtH4FVb+9J4h+XFPW7l/gQ9F8qC7P+Ec4k8QVQ=="],
+
     "@types/deep-eql": ["@types/deep-eql@4.0.2", "https://registry.npmmirror.com/@types/deep-eql/-/deep-eql-4.0.2.tgz", {}, "sha512-c9h9dVVMigMPc4bwTvC5dxqtqJZwQPePsWjPlpSOnojbor6pGqdk541lfA7AqFQr5pB1BRdq0juY9db81BwyFw=="],
 
     "@types/estree": ["@types/estree@1.0.8", "https://registry.npmmirror.com/@types/estree/-/estree-1.0.8.tgz", {}, "sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w=="],
@@ -239,6 +241,12 @@
     "@types/jsonfile": ["@types/jsonfile@6.1.4", "https://registry.npmmirror.com/@types/jsonfile/-/jsonfile-6.1.4.tgz", { "dependencies": { "@types/node": "*" } }, "sha512-D5qGUYwjvnNNextdU59/+fI+spnwtTFmyQP0h+PfIOSkNfpU6AOICUOkm4i0OnSk+NyjdPJrxCDro0sJsWlRpQ=="],
 
     "@types/node": ["@types/node@22.19.5", "https://registry.npmmirror.com/@types/node/-/node-22.19.5.tgz", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-HfF8+mYcHPcPypui3w3mvzuIErlNOh2OAG+BCeBZCEwyiD5ls2SiCwEyT47OELtf7M3nHxBdu0FsmzdKxkN52Q=="],
+
+    "@types/sharp": ["@types/sharp@0.29.5", "https://registry.npmmirror.com/@types/sharp/-/sharp-0.29.5.tgz", { "dependencies": { "@types/node": "*" } }, "sha512-3TC+S3H5RwnJmLYMHrcdfNjz/CaApKmujjY9b6PU/pE6n0qfooi99YqXGWoW8frU9EWYj/XTI35Pzxa+ThAZ5Q=="],
+
+    "@types/uuid": ["@types/uuid@10.0.0", "https://registry.npmmirror.com/@types/uuid/-/uuid-10.0.0.tgz", {}, "sha512-7gqG38EyHgyP1S+7+xomFtL+ZNHcKv6DwNaCZmJmo1vgMugyF3TCnXVg4t1uk89mLNwnLtnY3TpOpCOyp1/xHQ=="],
+
+    "@types/validator": ["@types/validator@13.7.15", "https://registry.npmmirror.com/@types/validator/-/validator-13.7.15.tgz", {}, "sha512-yeinDVQunb03AEP8luErFcyf/7Lf7AzKCD0NXfgVoGCCQDNpZET8Jgq74oBgqKld3hafLbfzt/3inUdQvaFeXQ=="],
 
     "@types/webidl-conversions": ["@types/webidl-conversions@7.0.3", "https://registry.npmmirror.com/@types/webidl-conversions/-/webidl-conversions-7.0.3.tgz", {}, "sha512-CiJJvcRtIgzadHCYXw7dqEnMNRjhGZlYK05Mj9OyktqV8uVT8fD2BFOB7S1uwBE3Kj2Z+4UyPmFw/Ixgw/LAlA=="],
 
@@ -368,7 +376,7 @@
 
     "fsevents": ["fsevents@2.3.3", "https://registry.npmmirror.com/fsevents/-/fsevents-2.3.3.tgz", { "os": "darwin" }, "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=="],
 
-    "fzz": ["fzz@2.28.0", "https://registry.npmmirror.com/fzz/-/fzz-2.28.0.tgz", { "dependencies": { "ansis": "4.1.0", "base64-js": "1.5.1", "better-sqlite3": "12.6.0", "bs58": "5.0.0", "cbor-x": "1.6.0", "chardet": "2.1.0", "check-image-type": "0.1.4", "client-zip": "^1.5.1", "common-prefix": "^1.1.0", "crypto-js": "4.1.1", "escape-html": "1.0.3", "fflate": "0.8.2", "js-base64": "3.7.6", "js-md5": "0.8.3", "js-sha256": "0.10.1", "jszip": "3.10.1", "nanotar": "0.1.1", "node-fetch": "3.3.2", "ohash": "1.1.4", "short-uuid": "5.2.0", "tsc-alias": "1.8.16", "uuid": "11.0.2", "validator": "13.9.0", "xss": "1.0.14" }, "peerDependencies": { "axios": "^1.13.4", "es-toolkit": "^1.44.0" } }, "sha512-USAxciW2PgIXc7uDjFJ7oWTzPLooS6Yw3Ea/DsMnFPyV+eD10Rw+NTzOZU2Jf2tfK8EdDFm0t8cMuC71ASyRDQ=="],
+    "fzz": ["fzz@3.1.9", "https://registry.npmmirror.com/fzz/-/fzz-3.1.9.tgz", { "dependencies": { "@types/better-sqlite3": "7.6.11", "@types/crypto-js": "^4.0.2", "@types/fs-extra": "11.0.4", "@types/sharp": "^0.29.5", "@types/uuid": "10.0.0", "@types/validator": "13.7.15", "ansis": "4.1.0", "base64-js": "1.5.1", "better-sqlite3": "12.6.0", "bs58": "5.0.0", "cbor-x": "1.6.0", "chardet": "2.1.0", "check-image-type": "0.1.4", "client-zip": "^1.5.1", "common-prefix": "^1.1.0", "crypto-js": "4.1.1", "escape-html": "1.0.3", "fflate": "0.8.2", "js-base64": "3.7.6", "js-md5": "0.8.3", "js-sha256": "0.10.1", "jszip": "3.10.1", "nanotar": "0.1.1", "node-fetch": "3.3.2", "ohash": "1.1.4", "short-uuid": "5.2.0", "tsc-alias": "1.8.16", "uuid": "11.0.2", "validator": "13.9.0", "xss": "1.0.14" }, "peerDependencies": { "axios": "^1.13.4", "es-toolkit": "^1.44.0" } }, "sha512-XT2Ioacq0uC6gmAuQw+5eTTSs9sSweY0A5MLxqXiL5BhA+ARM3eqFaX37fXt7hnX+rK7FY+KjakfZ1CDHqCWgA=="],
 
     "get-tsconfig": ["get-tsconfig@4.13.1", "https://registry.npmmirror.com/get-tsconfig/-/get-tsconfig-4.13.1.tgz", { "dependencies": { "resolve-pkg-maps": "^1.0.0" } }, "sha512-EoY1N2xCn44xU6750Sx7OjOIT59FkmstNc3X6y5xpz7D5cBtZRe/3pSlTkDJgqsOk3WwZPkWfonhhUJfttQo3w=="],
 
@@ -550,7 +558,7 @@
 
     "tunnel-agent": ["tunnel-agent@0.6.0", "https://registry.npmmirror.com/tunnel-agent/-/tunnel-agent-0.6.0.tgz", { "dependencies": { "safe-buffer": "^5.0.1" } }, "sha512-McnNiV1l8RYeY8tBgEpuodCC1mLUdbSN+CYBL7kJsJNInOP8UjDDEwdk6Mw60vdLLrr5NHKZhMAOSrR2NZuQ+w=="],
 
-    "typescript": ["typescript@5.9.3", "https://registry.npmmirror.com/typescript/-/typescript-5.9.3.tgz", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+    "typescript": ["typescript@6.0.3", "https://registry.npmmirror.com/typescript/-/typescript-6.0.3.tgz", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "undici-types": ["undici-types@6.21.0", "https://registry.npmmirror.com/undici-types/-/undici-types-6.21.0.tgz", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
 
@@ -583,6 +591,8 @@
     "anymatch/picomatch": ["picomatch@2.3.1", "https://registry.npmmirror.com/picomatch/-/picomatch-2.3.1.tgz", {}, "sha512-JU3teHTNjmE2VCGFzuY8EXzCDVwEqB2a8fsIvwaStHhAWJEeVd1o1QD80CU6+ZdEXXSLbSsuLwJjkCBWqRQUVA=="],
 
     "bl/readable-stream": ["readable-stream@3.6.2", "https://registry.npmmirror.com/readable-stream/-/readable-stream-3.6.2.tgz", { "dependencies": { "inherits": "^2.0.3", "string_decoder": "^1.1.1", "util-deprecate": "^1.0.1" } }, "sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA=="],
+
+    "fzz/@types/better-sqlite3": ["@types/better-sqlite3@7.6.11", "https://registry.npmmirror.com/@types/better-sqlite3/-/better-sqlite3-7.6.11.tgz", { "dependencies": { "@types/node": "*" } }, "sha512-i8KcD3PgGtGBLl3+mMYA8PdKkButvPyARxA7IQAd6qeslht13qxb1zzO8dRCtE7U3IoJS782zDBAeoKiM695kg=="],
 
     "micromatch/picomatch": ["picomatch@2.3.1", "https://registry.npmmirror.com/picomatch/-/picomatch-2.3.1.tgz", {}, "sha512-JU3teHTNjmE2VCGFzuY8EXzCDVwEqB2a8fsIvwaStHhAWJEeVd1o1QD80CU6+ZdEXXSLbSsuLwJjkCBWqRQUVA=="],
 

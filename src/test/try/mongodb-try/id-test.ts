@@ -34,6 +34,12 @@ interface Result {
     dataSizeMB: number
 }
 
+type BenchmarkDoc = {
+    _id: string | ObjectId | UUID
+    value: number
+    name: string
+}
+
 async function runBenchmark() {
     const client = new MongoClient(uri)
     const results: Result[] = []
@@ -44,7 +50,7 @@ async function runBenchmark() {
 
         for (const [name, generateId] of Object.entries(generators)) {
             console.log(`\n>>> 测试类型: ${name}`)
-            const collection = db.collection(`test_${name}`)
+            const collection = db.collection<BenchmarkDoc>(`test_${name}`)
             await collection.drop().catch(() => {})
 
             let totalInsertTime = 0

@@ -110,7 +110,7 @@ export class Table<TSchema extends ITableDoc = ITableDoc, TPlv extends IPlvMap =
 
     // -------------------------------------------------------
     // schema 相关
-    private __schema_hints!: ISchemaHints
+    __schema_hints!: ISchemaHints
     private __schema_init = __schema_init
     // 检查接口
     private __check_filter = __check_filter

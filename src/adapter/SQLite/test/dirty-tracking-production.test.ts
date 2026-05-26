@@ -10,8 +10,22 @@
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from "vitest"
-import { ITableDBAdapterInstance } from "../../adapter"
+import { ITableDBAdapterInstance, ITableDoc } from "../../adapter"
 import { SQLiteAdapter } from "../SQLiteAdapter"
+
+type OrderDoc = ITableDoc & {
+    items: Array<{ sku: string; qty: number; price: number }>
+    tags: string[]
+}
+
+type TagsDoc = ITableDoc & {
+    tags: string[]
+}
+
+type PersistentDoc = ITableDoc & {
+    items: string[]
+    counter: number
+}
 
 describe("Dirty Tracking 生产环境模拟测试", () => {
     let adapter!: ITableDBAdapterInstance
@@ -69,7 +83,7 @@ describe("Dirty Tracking 生产环境模拟测试", () => {
             // 6. 查询带有新标签的订单
             orders = await adapter.findMany({ tags: "express" })
             expect(orders.length).toBe(1)
-            expect(orders[0].items.length).toBe(3)
+            expect((orders[0] as OrderDoc).items).toHaveLength(3)
 
             // 7. 移除标签
             await adapter.updateOne({ id: "order-001" }, { $pull: { tags: "new" } })
@@ -174,8 +188,9 @@ describe("Dirty Tracking 生产环境模拟测试", () => {
                 await adapter.updateOne({ id: "doc-1" }, { $push: { tags: `tag-${i}` } })
             }
 
-            let doc = await adapter.get("doc-1")
-            expect(doc?.tags.length).toBe(51)  // initial + 50 tags
+            let doc = await adapter.get("doc-1") as TagsDoc | void
+            expect(doc).toBeDefined()
+            expect((doc as TagsDoc).tags).toHaveLength(51)  // initial + 50 tags
 
             // 查询特定标签
             let results = await adapter.findMany({ tags: "tag-25" })
@@ -186,8 +201,9 @@ describe("Dirty Tracking 生产环境模拟测试", () => {
                 await adapter.updateOne({ id: "doc-1" }, { $pull: { tags: `tag-${i}` } })
             }
 
-            doc = await adapter.get("doc-1")
-            expect(doc?.tags.length).toBe(26)  // initial + 25 remaining
+            doc = await adapter.get("doc-1") as TagsDoc | void
+            expect(doc).toBeDefined()
+            expect((doc as TagsDoc).tags).toHaveLength(26)  // initial + 25 remaining
 
             // 验证删除的标签查询不到
             results = await adapter.findMany({ tags: "tag-10" })
@@ -374,11 +390,12 @@ describe("Dirty Tracking 生产环境模拟测试", () => {
             }
 
             // 最终验证
-            const p1 = await adapter.get("persistent-1")
-            const p2 = await adapter.get("persistent-2")
+            const p1 = await adapter.get("persistent-1") as PersistentDoc | void
+            const p2 = await adapter.get("persistent-2") as PersistentDoc | void
 
             expect(p1?.counter).toBe(100)  // 500/5 = 100 次 $inc
-            expect(p2?.items.length).toBe(101)  // init + 100 次 $push
+            expect(p2).toBeDefined()
+            expect((p2 as PersistentDoc).items).toHaveLength(101)  // init + 100 次 $push
 
             // 查询仍然正确
             const results = await adapter.findMany({ items: "init" })

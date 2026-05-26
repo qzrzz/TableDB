@@ -28,7 +28,7 @@
         "fake-indexeddb": "6.2.5",
         "fs-extra": "11.3.3",
         "tinybench": "6.0.0",
-        "typescript": "^5.9.3"
+        "typescript": "^6.0.3"
     },
     "dependencies": {
         "@fontsource/google-sans-code": "5.2.3",
