@@ -88,6 +88,14 @@ export interface SQLiteAdapterConfig {
     /** 是否启用 ZSTD 压缩（打开文件前解压，关闭文件时压缩） */
     zstd?: boolean
     /**
+     * 多进程访问模式
+     * 使用 WAL 模式和适当的同步设置，SQLite 可以支持多个进程同时访问同一个数据库文件。
+        * 启用 multi 模式后，SQLiteAdapter 将自动配置数据库连接以支持多进程访问：
+        * - PRAGMA journal_mode=WAL
+        * - PRAGMA busy_timeout=15000
+     */
+    multi?: boolean
+    /**
      * SQLite 驱动类型
      * - "better-sqlite3": 使用 better-sqlite3（需要安装依赖，兼容性好，支持自定义函数）
      * - "node:sqlite": 使用 Node.js 内置模块（Node.js 22.5+ 无需安装依赖，支持自定义函数）
@@ -128,26 +136,32 @@ export function SQLiteAdapter(config: SQLiteAdapterConfig): ITableDBAdapter {
 
             // 根据配置选择驱动
             const synchronous = config.safe === "full" ? "FULL" : config.safe ? "NORMAL" : "OFF"
+            const driverConfig = {
+                filename,
+                walMode: config.multi === true,
+                busyTimeout: config.multi ? 15000 : undefined,
+                synchronous,
+            }
 
             if (config.driver === "auto" || !config.driver) {
                 // 自动选择驱动
-                const result = createAutoSqliteDriver({ filename, walMode: true, synchronous })
+                const result = createAutoSqliteDriver(driverConfig)
                 db = result.db
                 driverType = result.type
             } else {
                 // 使用指定的驱动
-                db = createSqliteDriver(config.driver, { filename, walMode: true, synchronous })
+                db = createSqliteDriver(config.driver, driverConfig)
                 driverType = config.driver
             }
 
             console.log(`[SQLiteAdapter] using driver: ${driverType}`)
-            
+
             // bun:sqlite 不支持自定义函数，跳过注册
             if (driverType === "bun:sqlite") {
                 console.warn(
                     "[SQLiteAdapter] bun:sqlite 不支持自定义函数，" +
-                    "将无法使用混合查询模式 (JsMatch/JsPatch)。" +
-                    "所有查询将强制使用纯 SQL 模式。"
+                        "将无法使用混合查询模式 (JsMatch/JsPatch)。" +
+                        "所有查询将强制使用纯 SQL 模式。",
                 )
             } else {
                 registerCustomFunctions(db)
@@ -222,11 +236,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         private db: ISqliteDatabase,
         private tableName: string,
         private config: SQLiteAdapterConfig,
-        private driverType: SqliteDriverType = "better-sqlite3"
+        private driverType: SqliteDriverType = "better-sqlite3",
     ) {
         // bun:sqlite 不支持自定义函数
         this.supportsCustomFunctions = driverType !== "bun:sqlite"
-        
+
         // 1. 确保存储表存在
         this.getStatement(
             `
@@ -235,7 +249,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 id TEXT UNIQUE,
                 data TEXT
             )
-        `
+        `,
         ).run()
 
         // 2. 创建 Schema Dirty 记录表
@@ -247,7 +261,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 hasArray INTEGER DEFAULT 0,
                 hasSpecial INTEGER DEFAULT 0
             )
-        `
+        `,
         ).run()
 
         this.loadExistingIndexes()
@@ -259,7 +273,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     private loadDirtyFields() {
         try {
             const rows = this.getStatement(
-                `SELECT path, hasArray, hasSpecial FROM "_schema_dirty_${this.tableName}"`
+                `SELECT path, hasArray, hasSpecial FROM "_schema_dirty_${this.tableName}"`,
             ).all() as any[]
             for (const row of rows) {
                 this.dirtyFieldCache.set(row.path, {
@@ -274,7 +288,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
     /**
      * 检查查询是否可以使用纯 SQL 模式
-     * 
+     *
      * 如果当前驱动不支持自定义函数（如 bun:sqlite），则强制返回 true，
      * 使用纯 SQL 模式（可能会有语义差异，但至少不会报错）
      */
@@ -312,7 +326,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 ON CONFLICT(path) DO UPDATE SET
                     hasArray = MAX(hasArray, excluded.hasArray),
                     hasSpecial = MAX(hasSpecial, excluded.hasSpecial)
-            `
+            `,
             ).run(path, entry.hasArray ? 1 : 0, entry.hasSpecial ? 1 : 0)
         }
     }
@@ -354,7 +368,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     private loadExistingIndexes() {
         const idxs = this.db
             .prepare(
-                `SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%'`
+                `SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%'`,
             )
             .all(this.tableName) as { name: string; sql: string }[]
 
@@ -445,7 +459,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             `
             INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)
             ON CONFLICT(id) DO UPDATE SET data=excluded.data
-        `
+        `,
         ).run(String(id), JSON.stringify(sVal))
     }
 
@@ -481,7 +495,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const q = await mongoToSql(
             filter,
             { indexedFields: this.indexedFields, tableName: this.tableName } as any,
-            this.dirtyFieldCache
+            this.dirtyFieldCache,
         )
         const isCompatible = this.isQueryCompatible(filter)
 
@@ -502,7 +516,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 const plan = this.getStatement(`EXPLAIN QUERY PLAN ${sql}`).all(...params)
                 options!.debug!.sqlPlan = plan as any
                 options!.debug!.isFullScan = plan.some(
-                    (row: any) => row.detail.includes("SCAN TABLE") && !row.detail.includes("USING INDEX")
+                    (row: any) => row.detail.includes("SCAN TABLE") && !row.detail.includes("USING INDEX"),
                 )
             } catch (e) {}
         }
@@ -570,7 +584,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const q = await mongoToSql(
             filter,
             { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any,
-            this.dirtyFieldCache
+            this.dirtyFieldCache,
         )
 
         // 策略分析 (Strategy Analysis)
@@ -581,7 +595,10 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             options!.debug!.strategy = isCompatible ? "SQL" : "HYBRID"
             options!.debug!.dirtyReasons = analysis.reasons
             if (!this.supportsCustomFunctions && !analysis.compatible) {
-                options!.debug!.dirtyReasons.push({ path: "*", reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式" })
+                options!.debug!.dirtyReasons.push({
+                    path: "*",
+                    reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式",
+                })
             }
             debug.setPrepareTime()
         } else {
@@ -616,7 +633,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 const plan = this.getStatement(`EXPLAIN QUERY PLAN ${sql}`).all(...params)
                 options!.debug!.sqlPlan = plan as any
                 options!.debug!.isFullScan = plan.some(
-                    (row: any) => row.detail.includes("SCAN TABLE") && !row.detail.includes("USING INDEX")
+                    (row: any) => row.detail.includes("SCAN TABLE") && !row.detail.includes("USING INDEX"),
                 )
             } catch (e) {
                 /* ignore */
@@ -677,7 +694,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     async updateMany(
         filter: ITableFilter,
         updateOp: ITableUpdateOp<ITableDoc>,
-        options?: ITableUpdateOptions
+        options?: ITableUpdateOptions,
     ): Promise<ITableUpdateResult> {
         let debug: DebugCollector | undefined
         if (options?.debug) debug = new DebugCollector(options.debug)
@@ -688,14 +705,17 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             const strategyCompatible = this.supportsCustomFunctions ? analysis.compatible : true
             options!.debug!.strategy = strategyCompatible ? "SQL" : "HYBRID"
             if (!this.supportsCustomFunctions && !analysis.compatible) {
-                options!.debug!.dirtyReasons.push({ path: "*", reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式" })
+                options!.debug!.dirtyReasons.push({
+                    path: "*",
+                    reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式",
+                })
             }
         }
 
         const q = await mongoToSql(
             filter,
             { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any,
-            this.dirtyFieldCache
+            this.dirtyFieldCache,
         )
         const isCompatible = this.isQueryCompatible(filter)
 
@@ -800,7 +820,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
     async bulkUpdate(
         updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[],
-        options?: { debug?: ITableDebugResult }
+        options?: { debug?: ITableDebugResult },
     ): Promise<ITableUpdateResult> {
         let matchedCount = 0
         let modifiedCount = 0
@@ -836,7 +856,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
     async bulkUpdateSync(
         updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[],
-        options?: { debug?: ITableDebugResult }
+        options?: { debug?: ITableDebugResult },
     ): Promise<ITableUpdateResult> {
         // ... (原逻辑保持不变)
         let matchedCount = 0
@@ -868,7 +888,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                     indexedFields: this.indexedFields,
                     tableName: this.tableName,
                 } as any,
-                this.dirtyFieldCache
+                this.dirtyFieldCache,
             )
 
             q.limit = 1
@@ -944,11 +964,13 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         // 2. 执行阶段 (事务中)
         const bulkUpdateTx = this.db.transaction(() => {
             const insertStmt = this.getStatement(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
-            
+
             // 根据是否支持自定义函数选择不同的更新策略
             if (this.supportsCustomFunctions) {
                 // 使用 JsPatch 进行高效的 SQL 内更新
-                const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`)
+                const updateStmt = this.getStatement(
+                    `UPDATE "${this.tableName}" SET data = JsPatch(data, ?) WHERE _id = ?`,
+                )
 
                 for (const prepared of preparedUpdates) {
                     try {
@@ -1026,7 +1048,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     async updateOne(
         filter: ITableFilter,
         updateOp: ITableUpdateOp<ITableDoc>,
-        options?: ITableUpdateOptions
+        options?: ITableUpdateOptions,
     ): Promise<ITableUpdateResult> {
         let debug: DebugCollector | undefined
         if (options?.debug) debug = new DebugCollector(options.debug)
@@ -1037,14 +1059,17 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             const strategyCompatible = this.supportsCustomFunctions ? analysis.compatible : true
             options!.debug!.strategy = strategyCompatible ? "SQL" : "HYBRID"
             if (!this.supportsCustomFunctions && !analysis.compatible) {
-                options!.debug!.dirtyReasons.push({ path: "*", reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式" })
+                options!.debug!.dirtyReasons.push({
+                    path: "*",
+                    reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式",
+                })
             }
         }
 
         const q = await mongoToSql(
             filter,
             { sort: options?.sort, indexedFields: this.indexedFields, tableName: this.tableName } as any,
-            this.dirtyFieldCache
+            this.dirtyFieldCache,
         )
         q.limit = 1
 
@@ -1348,14 +1373,17 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             const strategyCompatible = this.supportsCustomFunctions ? analysis.compatible : true
             options!.debug!.strategy = strategyCompatible ? "SQL" : "HYBRID"
             if (!this.supportsCustomFunctions && !analysis.compatible) {
-                options!.debug!.dirtyReasons.push({ path: "*", reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式" })
+                options!.debug!.dirtyReasons.push({
+                    path: "*",
+                    reason: "bun:sqlite 不支持自定义函数，强制使用纯 SQL 模式",
+                })
             }
         }
 
         const q = await mongoToSql(
             filter,
             { ...options, indexedFields: this.indexedFields, tableName: this.tableName } as any,
-            this.dirtyFieldCache
+            this.dirtyFieldCache,
         )
         const isCompatible = this.isQueryCompatible(filter)
 
@@ -1399,7 +1427,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const q = await mongoToSql(
             filter,
             { ...options, limit: 1, indexedFields: this.indexedFields, tableName: this.tableName } as any,
-            this.dirtyFieldCache
+            this.dirtyFieldCache,
         )
         const isCompatible = this.isQueryCompatible(filter)
 
@@ -1502,7 +1530,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 val,
                 id,
                 PRIMARY KEY (val, id)
-            )`
+            )`,
         ).run()
 
         const extractArr = `
@@ -1523,14 +1551,14 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 ${extractArr}
                 UNION
                 ${extractScalarAndObject};
-            END;`
+            END;`,
         ).run()
 
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_delete" AFTER DELETE ON "${this.tableName}"
             BEGIN
                 DELETE FROM "${sideTableName}" WHERE id = OLD.id;
-            END;`
+            END;`,
         ).run()
 
         this.getStatement(
@@ -1541,7 +1569,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 ${extractArr}
                 UNION
                 ${extractScalarAndObject};
-            END;`
+            END;`,
         ).run()
 
         // 初始化回填
@@ -1561,7 +1589,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             `INSERT OR IGNORE INTO "${sideTableName}" (val, id)
             ${backfillArr}
             UNION
-            ${backfillScalarAndObject}`
+            ${backfillScalarAndObject}`,
         ).run()
 
         this.indexedFields.add(field)
@@ -1608,14 +1636,14 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 ${extractArr}
                 UNION
                 ${extractScalarAndNull};
-            END;`
+            END;`,
         ).run()
 
         this.getStatement(
             `CREATE TRIGGER IF NOT EXISTS "t_${sideTableName}_delete" AFTER DELETE ON "${this.tableName}"
             BEGIN
                 DELETE FROM "${sideTableName}" WHERE id = OLD.id;
-            END;`
+            END;`,
         ).run()
 
         this.getStatement(
@@ -1626,7 +1654,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 ${extractArr}
                 UNION
                 ${extractScalarAndNull};
-            END;`
+            END;`,
         ).run()
     }
 
@@ -1648,7 +1676,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 `INSERT OR IGNORE INTO "${sideTableName}" (val, id)
                 ${backfillArr}
                 UNION
-                ${backfillScalar}`
+                ${backfillScalar}`,
             ).run()
         }
     }
@@ -1657,7 +1685,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         const dropTx = this.db.transaction(() => {
             const idxs = this.db
                 .prepare(
-                    `SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%'`
+                    `SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%'`,
                 )
                 .all(this.tableName) as { name: string; sql: string }[]
 

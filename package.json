@@ -16,7 +16,7 @@
         "build": "rslib build",
         "dev": "rslib build --watch",
         "test": "vitest",
-        "docs:dev": "starmap ",
+        "docs:dev": "starmap --rebuild --port=4811",
         "docs:build": "starmap build"
     },
     "devDependencies": {

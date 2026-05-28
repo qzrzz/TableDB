@@ -94,6 +94,11 @@ export class NodeSqliteDriver implements ISqliteDatabase {
             this.db.exec("PRAGMA journal_mode = WAL")
         }
 
+        // 配置锁等待时间，避免多进程抢锁时立刻失败
+        if (config.busyTimeout !== undefined) {
+            this.db.exec(`PRAGMA busy_timeout = ${config.busyTimeout}`)
+        }
+
         // 配置同步模式
         if (config.synchronous) {
             this.db.exec(`PRAGMA synchronous = ${config.synchronous}`)

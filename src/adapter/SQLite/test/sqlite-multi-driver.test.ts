@@ -4,9 +4,12 @@
  * 测试 SQLiteAdapter 使用不同驱动（better-sqlite3 和 node:sqlite）时的功能一致性
  */
 
+import { existsSync, rmSync } from "fs"
+import { tmpdir } from "os"
+import { join } from "path"
 import { describe, test, expect, beforeEach, afterEach } from "vitest"
 import { SQLiteAdapter, isSqliteDriverAvailable } from "../index"
-import type { SqliteDriverType } from "../driver"
+import { createSqliteDriver, type SqliteDriverType } from "../driver"
 import type { ITableDBAdapterInstance } from "../../adapter"
 
 // 获取可用的驱动列表
@@ -21,6 +24,34 @@ if (isSqliteDriverAvailable("node:sqlite")) {
 }
 
 describe("SQLiteAdapter 多驱动测试", () => {
+    describe.each(availableDrivers)("multi 模式配置: %s", (driverType) => {
+        test("启用 multi 后会开启 WAL 并设置 15 秒锁等待", () => {
+            const dbPath = join(tmpdir(), `tbdb-multi-${driverType.replace(/[:]/g, "_")}-${Date.now()}.sqlite`)
+
+            try {
+                const db = createSqliteDriver(driverType, {
+                    filename: dbPath,
+                    walMode: true,
+                    busyTimeout: 15000,
+                })
+
+                const journalModeRow = db.prepare("PRAGMA journal_mode").get()
+                const busyTimeoutRow = db.prepare("PRAGMA busy_timeout").get()
+                const journalMode = String(Object.values(journalModeRow ?? {})[0] ?? "")
+                const busyTimeout = Number(Object.values(busyTimeoutRow ?? {})[0] ?? 0)
+
+                expect(journalMode.toLowerCase()).toBe("wal")
+                expect(busyTimeout).toBe(15000)
+
+                db.close()
+            } finally {
+                if (existsSync(dbPath)) rmSync(dbPath, { force: true })
+                if (existsSync(`${dbPath}-wal`)) rmSync(`${dbPath}-wal`, { force: true })
+                if (existsSync(`${dbPath}-shm`)) rmSync(`${dbPath}-shm`, { force: true })
+            }
+        })
+    })
+
     describe.each(availableDrivers)("驱动: %s", (driverType) => {
         let adapter: ITableDBAdapterInstance
 

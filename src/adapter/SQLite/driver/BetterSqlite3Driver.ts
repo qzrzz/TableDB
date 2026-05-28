@@ -58,6 +58,11 @@ export class BetterSqlite3Driver implements ISqliteDatabase {
             this.db.pragma("journal_mode = WAL")
         }
 
+        // 配置锁等待时间，避免多进程抢锁时立刻失败
+        if (config.busyTimeout !== undefined) {
+            this.db.pragma(`busy_timeout = ${config.busyTimeout}`)
+        }
+
         // 配置同步模式
         if (config.synchronous) {
             this.db.pragma(`synchronous = ${config.synchronous}`)

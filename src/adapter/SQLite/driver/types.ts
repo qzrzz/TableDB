@@ -108,6 +108,8 @@ export interface ISqliteDriverConfig {
     filename: string
     /** 是否启用 WAL 模式 */
     walMode?: boolean
+    /** 数据库繁忙时的等待时间，单位毫秒 */
+    busyTimeout?: number
     /** 同步模式: "OFF" | "NORMAL" | "FULL" */
     synchronous?: "OFF" | "NORMAL" | "FULL"
 }
