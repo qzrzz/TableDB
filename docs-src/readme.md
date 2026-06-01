@@ -298,9 +298,9 @@ table.findMany({ "ob.b": 2 })
 #### 逻辑组合
 
 - `$and: [ filter1, filter2, ... ]`：与逻辑，所有子条件都必须满足
-- `$or: [ filter1, filter2, ... ]`：或逻辑
+- `$or: [ filter1, filter2, ... ]`：或逻辑，至少满足一个子条件
 - `$nor: [ filter1, filter2, ... ]`： 非或逻辑，所有子条件都不满足
-- `$not : match`：非逻辑，条件不满足
+- `$not : match`：非逻辑，不满足条件
 
 ```ts
 // 匹配 status 为 "active" 且 age 大于等于 18 的文档
