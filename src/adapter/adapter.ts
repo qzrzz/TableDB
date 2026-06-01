@@ -45,7 +45,7 @@ export interface ITableDBAdapterInstance {
     updateOne(
         filter: ITableFilter,
         updateOp: ITableUpdateOp<ITableDoc>,
-        options?: ITableUpdateOptions
+        options?: ITableUpdateOptions,
     ): Promise<ITableUpdateResult>
 
     /** 修改多个现有文档
@@ -55,14 +55,14 @@ export interface ITableDBAdapterInstance {
     updateMany(
         filter: ITableFilter,
         updateOp: ITableUpdateOp<ITableDoc>,
-        options?: ITableUpdateOptions
+        options?: ITableUpdateOptions,
     ): Promise<ITableUpdateResult>
 
     /** 批量修改多个文档
      *  根据每个 update 的 filter 进行匹配 ，可能会修改多个文档
      */
     bulkUpdate(
-        updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[]
+        updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[],
     ): Promise<ITableUpdateResult>
 
     /** 插入新文档
@@ -143,7 +143,7 @@ export interface ITableFindOptions {
      *
      *  可以是 plv 预设投影名称
      */
-    projection?: string[] | Record<string, 1 | -1>
+    projection?: string[] | Record<string, 1 | -1> | string
 
     /** 排序字段列表
      *
@@ -164,7 +164,6 @@ export interface ITableFindOptions {
      *  提供一个对象用来接受调试信息，调试信息会写入该对象 */
     debug?: ITableDebugResult
 }
-
 
 export interface ITableUpdateOptions {
     /** 是否在没有匹配的文档时插入一个新文档，然后再进行更新操作 */
@@ -224,7 +223,6 @@ export interface ITableSetOptions {
     debug?: ITableDebugResult
 }
 
-
 export interface ITableDebugResult {
     // --- Execution Info (执行细节) ---
     /** SQL 语句及其参数，结构化存储，支持多条（如批量操作或回退查询） */
@@ -274,7 +272,6 @@ export interface ITableDebugResult {
 
     [key: string]: any
 }
-
 
 export interface ITableDefineIndexesOptions {
     /** 是否强制重新创建索引，默认 false */

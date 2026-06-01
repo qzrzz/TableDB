@@ -10,7 +10,7 @@ import { UID } from "fzz"
 export function __check_filter(
     this: Table,
     filter: ITableFilter,
-    options?: { ignoreMarkDelete?: boolean; realDelete?: boolean } & Record<string, any>
+    options?: { ignoreMarkDelete?: boolean; realDelete?: boolean } & Record<string, any>,
 ) {
     this.eventHub.emit(TabeEvents.CheckFilter, { filter, options })
     if (this.options?.enableMarkDelete && !options?.ignoreMarkDelete && !options?.realDelete) {
@@ -48,7 +48,12 @@ export function __check_find_options(this: Table, options?: { projection?: any }
     if (options?.projection) {
         // 处理预设投影
         if (typeof options.projection === "string") {
-            options.projection = this.plv(options.projection as any)
+            let found = this.plv(options.projection)
+            // 为了安全起见，如果给定名称没有找到 projection 会抛错
+            if (!found) {
+                throw new Error(`Projection "${options.projection}" not found in PLV.`)
+            }
+            options.projection = found
         }
     }
 }

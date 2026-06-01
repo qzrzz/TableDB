@@ -90,9 +90,10 @@ export interface SQLiteAdapterConfig {
     /**
      * 多进程访问模式
      * 使用 WAL 模式和适当的同步设置，SQLite 可以支持多个进程同时访问同一个数据库文件。
-        * 启用 multi 模式后，SQLiteAdapter 将自动配置数据库连接以支持多进程访问：
-        * - PRAGMA journal_mode=WAL
-        * - PRAGMA busy_timeout=15000
+     * 启用 multi 模式后，SQLiteAdapter 将自动配置数据库连接以支持多进程访问：
+     * - PRAGMA journal_mode=WAL
+     * - PRAGMA busy_timeout=15000
+     * 可以与 `safe:true` 一起使用
      */
     multi?: boolean
     /**
