@@ -27,3 +27,46 @@ A very simple NoSQL database abstraction layer that provides MongoDB-like CRUD A
     - `autoMetadata` 自动元数据（创建时间，修改时间）
     - `markDelete` 标记删除
     - `tree` 目录树存储
+
+
+
+
+## 安装
+
+```sh [npm]
+$ npm add -D tbdb fzz
+```
+
+> `fzz` 是 TableDB 使用的数据类型定义库 `dto` 的依赖，可选安装，如果你不需要通过定义 Schema 获得更好的 TypeScript 类型提示，可以不安装。
+
+## 快速开始
+
+```ts
+import { defineTable, SQLiteAdapter } from "tbdb"
+
+// 1. 定义 Table，并得到 useTable 函数
+let useMemberTable = defineTable({
+    name: "Member",
+    adapter: SQLiteAdapter({ filename: "./member.sqlite" }),
+})
+
+// 2.使用 useTable 创建 Table 实例
+let memberTable = await useMemberTable()
+
+// 3.使用 Table 实例进行数据操作
+await memberTable.insertMany([
+    {
+        id: "member1",
+        name: "Alice",
+        age: 30,
+    },
+])
+
+let members = await memberTable.findMany({ age: { $gt: 20 } })
+```
+
+## 项目目录结构
+
+- 接口定义：`./core/types.ts`, `./adapter/adapter.ts`
+- 核心实现：`./core/Table.ts`
+- 适配器实现：`./adapter/`
