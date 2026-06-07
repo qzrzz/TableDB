@@ -20,6 +20,15 @@ export interface ITreeNode extends ITableDoc {
     index?: number
     /** 子级排序序号（子级最后一个节点的序号） */
     clidLastIndex?: number
+    /** 尺寸 */
+    size: number
+    // 树结构数据 ---------------------
+    /** 子级大小 （所有子级节点，不包括自身节点的大小） */
+    csize: number
+    /** 子级数量 （所有子级节点的数量，包括文件夹和文件 ） */
+    ctotal: number
+    /** 子级文件树 （仅直接子节点的数量，仅包含文件） */
+    cftotal: number
 }
 
 /**
