@@ -1,5 +1,5 @@
 import type { TableTree } from "../TableTree"
-import { ITreeNode } from "../tree.types"
+import { ITreeIndexOptions, ITreeNode } from "../tree.types"
 
 /** 创建节点
  *
@@ -7,9 +7,12 @@ import { ITreeNode } from "../tree.types"
  */
 export async function createNodes(
     this: InstanceType<typeof TableTree>,
-    /** 父级节点 id ，如果为 "/" 表示根节点 */
-    parentId: string,
     /** 要创建的节点文档 */
     nodes: ITreeNode[],
-
+    /** 父级节点 id ，如果为 "/" 表示根节点 */
+    parentId: string,
+    options?: {
+        /** 是否自动设置 index 并配置插入的位置 */
+        index?: ITreeIndexOptions
+    },
 ) {}

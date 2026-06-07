@@ -30,6 +30,32 @@ let user = await userTable.findOne({ id: "123" })
 let users = await userTable.findMany({ age: { $gt: 20 } })
 ```
 
+### 结果排序`sort`
+
+- 可以是字符串数组， 前面加 `-` 表示降序。例如 `["name", "-age"]` 表示先按 name 升序排序，再按 age 降序排序
+- 也可以是字段映射对象，1 表示升序，-1 表示降序
+
+```ts
+type sort = string[] | Record<string, 1 | -1>
+let sort1 = ["name", "-age"]
+let sort2 = { name: 1, age: -1 }
+```
+
+### 返回字段映射 `projection`
+
+通过 `projection` 参数可以指定返回文档的部分字段，而不是全部文档字段。`projection` 的格式有三种：
+
+- 可以是字符串数组，表示包含的字段列表
+- 也可以是字段映射对象，1 表示包含该字段，-1 表示排除该字段 （不能同时包含和排除字段）
+- 也可以是 plv 预设投影名称，根据 Table 定义的 projections 返回字段
+
+```ts
+type projection = string[] | Record<string, 1 | -1> | string
+let projection1 = ["name", "age"] // 只返回 name 和 age 字段
+let projection2 = { name: 1, age: 1 } // 只返回 name 和 age 字段
+let projectionLv = "full" // 根据 Table 定义的 projections 返回字段
+```
+
 ## 更新文档
 
 - `updateOne(filter, update)` 更新一个符合 `filter` 的文档

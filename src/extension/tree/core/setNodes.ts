@@ -1,16 +1,12 @@
-import { ITableFilter, ITableUpdateOp } from "../../../core/types"
 import type { TableTree } from "../TableTree"
-import { ITreeNode } from "../tree.types"
+import { ITreeNode, ITreeOverwriteOptions } from "../tree.types"
 
 /** 设置节点
- *  可以通过 `options.deep` 参数递归更新子节点
+ *  设置节点数据，已存在的节点会被覆盖，不存在的节点会被创建
  */
 export function setNodes(
     this: InstanceType<typeof TableTree>,
-    filter: ITableFilter,
-    updateOp: ITableUpdateOp<any>,
-    options?: {
-        /** 是否递归更新子节点 */
-        deep?: boolean
-    },
+    /** 要设置的节点数据列表 */
+    nodes: Partial<ITreeNode>[],
+    options?: ITreeOverwriteOptions & {},
 ) {}

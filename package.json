@@ -36,6 +36,7 @@
         "better-sqlite3": "12.6.0",
         "es-toolkit": "1.43.0",
         "fzz": "*",
+        "indexless": "1.0.0",
         "mongodb": "7.0.0",
         "vitest": "4.0.16",
         "zstd-napi": "0.0.12"
