@@ -3,7 +3,7 @@ sort: 5
 icon: ri-braces-fill
 ---
 
-# 更新操作符 | Operators
+# 操作符 | Operators
 
 ## 更新操作符 `updateOp`
 

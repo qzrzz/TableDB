@@ -10,10 +10,8 @@ export interface ITreeNode extends ITableDoc {
     modif: number
     /** 节点类型 */
     type?: string
-    /** 是否是目录节点
-     *  用来确认是否有子节点
-     *  如果有子节点，则 isDir 一定为 true
-     *  如果 isDir 为 true 不一定有子节点，因为可能存在空目录节点
+    /** 是否是文件夹节点
+     *  无论是否是文件夹节点，任何节点都可以有子节点
      */
     isDir: boolean
     /** 排序索引 */
@@ -27,7 +25,7 @@ export interface ITreeNode extends ITableDoc {
     csize: number
     /** 子级数量 （所有子级节点的数量，包括文件夹和文件 ） */
     ctotal: number
-    /** 子级文件树 （仅直接子节点的数量，仅包含文件） */
+    /** 子级文件数量 （所有子级节点的数量，仅包含文件） */
     cftotal: number
 }
 
