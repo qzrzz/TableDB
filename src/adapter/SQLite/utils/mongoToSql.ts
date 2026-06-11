@@ -422,8 +422,20 @@ async function parseFieldCondition(
                                     // 对于非索引数组字段，需要使用 json_each 展开数组检查元素
                                     // 因为 json_extract 返回整个数组 JSON，而非单个元素
                                     // 左侧 IN 匹配标量值，右侧 EXISTS 匹配数组元素
+                                    //
+                                    // 注意：必须先用两参数形式的 json_type(data, path) 判断字段确实是数组，
+                                    // 再调用 json_each。否则当字段是标量字符串时（如 name="src"），
+                                    // json_each(json_extract(...)) 会把 "src" 当作 JSON 解析而抛出 "malformed JSON"。
+                                    const pathParts = path.split(".")
+                                    const jsonPath = pathParts
+                                        .map((part, idx) => {
+                                            if (idx === 0) return `$.${part}`
+                                            if (/^\d+$/.test(part)) return `[${part}]`
+                                            return `.${part}`
+                                        })
+                                        .join("")
                                     inConditions.push(
-                                        `(${colExpr} IN (${marks}) OR EXISTS (SELECT 1 FROM json_each(${colExpr}) WHERE value IN (${marks})))`
+                                        `(${colExpr} IN (${marks}) OR (json_type(data, '${jsonPath}') = 'array' AND EXISTS (SELECT 1 FROM json_each(data, '${jsonPath}') WHERE value IN (${marks}))))`
                                     )
                                 }
 
