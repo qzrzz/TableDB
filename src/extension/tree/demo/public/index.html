@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TableTree 目录树演示</title>
+    <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+    <header class="topbar">
+        <div class="title">
+            <span class="logo">🌳</span> TableTree 目录树演示
+            <span class="sub">SQLite 存储 · 每个操作都记录命令数与耗时</span>
+        </div>
+        <div class="agg" id="agg">
+            <div class="agg-item"><span class="agg-num" id="aggOps">0</span><span class="agg-label">操作</span></div>
+            <div class="agg-item"><span class="agg-num" id="aggCmds">0</span><span class="agg-label">DB 命令</span></div>
+            <div class="agg-item"><span class="agg-num" id="aggWall">0</span><span class="agg-label">累计耗时 ms</span></div>
+        </div>
+    </header>
+
+    <div class="toolbar">
+        <button data-act="newFolderRoot">＋ 根目录文件夹</button>
+        <button data-act="newFileRoot">＋ 根目录文件</button>
+        <button data-act="refresh">⟳ 刷新</button>
+        <button data-act="listAllRoot">≡ 列出全部节点</button>
+        <button data-act="dragMode" id="dragModeBtn">⇅ 排序模式</button>
+        <span class="spacer"></span>
+        <span id="clipboardInfo" class="clipboard"></span>
+        <button data-act="recycle">🗑 回收站</button>
+        <button data-act="reset" class="danger">⚠ 重置数据库</button>
+    </div>
+
+    <main class="layout">
+        <section class="tree-pane">
+            <div id="tree" class="tree" tabindex="0"></div>
+        </section>
+        <aside class="side-pane" id="sidePane">
+            <div class="side-empty">点击左侧节点查看属性与操作</div>
+        </aside>
+    </main>
+
+    <section class="console">
+        <div class="console-head">
+            <span>📜 操作控制台</span>
+            <span class="spacer"></span>
+            <label class="chk"><input type="checkbox" id="showReads" checked /> 显示刷新读取</label>
+            <button data-act="clearLog">清空日志</button>
+        </div>
+        <div id="log" class="log"></div>
+    </section>
+
+    <div id="ctxMenu" class="ctx-menu hidden"></div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
