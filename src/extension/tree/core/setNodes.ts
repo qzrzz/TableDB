@@ -29,6 +29,8 @@ export type ITreeSetNodesOptions = ITreeOverwriteOptions & {
  *  4. 更新数据（使用 Table.setMany() 方法实现）
  *  5. 如果有 index 配置，更新排序索引
  *  6. 进行 metadata 维护
+ *
+ * 要注意如果修改了节点的 parentId 需要触发相应的 metadata 变更，并且遵守 ITreeOverwriteOptions 覆盖设置
  */
 export async function setNodes(
     this: TableTree<ITreeNode>,

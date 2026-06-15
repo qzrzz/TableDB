@@ -16,6 +16,9 @@ export interface ITreeDeleteResult {
 
 /** 恢复已删除的节点
  *
+ * 如果 TableTree 设置了 `enableMarkDelete: true`，
+ * 则删除节点时会把节点标记为已删除而不是直接从数据库中删除
+ * 这时就可以通过 `unDeleteNodes()` 方法来恢复这些被标记为已删除的节点。
  * 恢复时应当按后续实现的统一规则一并恢复子节点，
  * 注意要重新维护祖先节点上的树 metadata 字段
  */

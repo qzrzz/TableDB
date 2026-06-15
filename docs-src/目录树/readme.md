@@ -9,6 +9,10 @@ icon: ri-node-tree
 
 ## 概念
 
+### 节点属性
+
+@import "../../src/extension/tree/tree.types.ts" @only=ITreeNode
+
 ### 修改计数 `modif`、`cmodif`
 
 目录树里的每个节点都有 `modif` 和 `cmodif` 两个字段，通常是用节点修改时间的毫秒数。
@@ -116,53 +120,29 @@ icon: ri-node-tree
 
 ---
 
-## 接口
+## 核心接口
+
+TreeTable 可以除了可以使用基本的[增删改查](/units/docs-src-u589eu5220u6539u67e5)接口外，还有一些列专属接口：
 
 ### 创建节点 `createNodes()`
 
-在指定的父节点下批量创建新节点。所有创建的节点都将自动归属到指定的 `parentId` 下。
-
-```typescript
-export async function createNodes(
-    this: TableTree<ITreeNode>,
-    /** 要创建的节点文档 */
-    nodes: Partial<ITreeNode>[],
-    /** 父级节点 id ，如果为 "/" 表示根节点 */
-    parentId: string,
-    options?: ITreeCreateNodesOptions,
-): Promise<ITreeCreateResult> {}
-```
+@import "../../src/extension/tree/core/createNodes.ts" @doc=createNodes
 
 ### 更新节点 `updateNodes()`
 
-相比于 `setNodes()` , `updateNodes()` 是一个更底层的接口，提供了更灵活的更新能力。它接受一个过滤器参数 `filter` 来指定要更新哪些节点，以及一个更新操作参数 `updateOp` 来定义如何更新这些节点。
+@import "../../src/extension/tree/core/updateNodes.ts" @doc=updateNodes
 
-这意味着 `updateNodes()` 的资源消耗是不确定的，通常来说不会公开给客户端直接调用。
-
-```typescript
-export async function updateNodes(
-    this: TableTree<ITreeNode>,
-    filter: ITableFilter,
-    updateOp: ITableUpdateOp<ITreeNode>,
-    options?: ITreeUpdateNodesOptions,
-): Promise<ITreeChangeResult> {}
-```
+相比于 `setNodes()` , `updateNodes()` 是一个更底层的接口，提供了更灵活的更新能力。它接受一个过滤器参数 `filter` 来指定要更新哪些节点，以及一个更新操作参数 `updateOp` 来定义如何更新这些节点。这意味着 `updateNodes()` 的资源消耗是不确定的，通常来说不会公开给客户端直接调用。
 
 ### 设置节点数据 `setNodes()`
+
+@import "../../src/extension/tree/core/setNodes.ts" @doc=setNodes
 
 `setNodes()` 提供了简单的方式来创建或更新节点数据。它接受一个节点数据数组 `nodes`，可以根据数据更新或者创建节点。它的资源消耗是确定可控的，就是每个节点对应一次更新或创建操作。
 
 可以通过 `options.onlyUpdate` 选项来控制 `setNodes()` 只能更新已有节点而不创建新节点，避免更新已删除除节点时误创建新节点。
 
 在 `setNodes()` 中可以使用覆盖选项来控制当目标位置有冲突节点时的处理方式，覆盖选项包括 `uniqueBy` 和 `overwriteMode`，具体见 [节点覆盖选项](#节点覆盖选项)。
-
-```ts
-export async function setNodes(
-    this: TableTree<ITreeNode>,
-    nodes: Partial<ITreeNode>[],
-    options?: ITreeSetNodesOptions,
-): Promise<ITreeChangeResult & Partial<ITreePreSyncNodeResult>> {}
-```
 
 #### 预同步
 
@@ -172,33 +152,32 @@ export async function setNodes(
 
 ### 删除节点 `deleteNodes()`
 
-删除指定节点及其子树。可以通过 `options.deep` 参数控制是否递归删除子节点。
-
-```ts
-export async function deleteNodes(
-    this: TableTree<ITreeNode>,
-    /** 要删除的节点 id 列表 */
-    nodeIds: string[],
-    options?: ITreeDeleteNodesOptions,
-): Promise<ITreeDeleteResult>
-```
+@import "../../src/extension/tree/core/deleteNodes.ts" @doc=deleteNodes
 
 ### 恢复删除的节点 `unDeleteNodes()`
 
-如果 TableTree 设置了 `enableMarkDelete: true`，则删除节点时会把节点标记为已删除而不是直接从数据库中删除，这时就可以通过 `unDeleteNodes()` 方法来恢复这些被标记为已删除的节点。
+@import "../../src/extension/tree/core/unDeleteNodes.ts" @doc=unDeleteNodes
 
-```ts
-export async function unDeleteNodes(
-    this: TableTree<ITreeNode>,
-    nodeIds: string[],
-    options?: ITreeUnDeleteNodesOptions,
-): Promise<void> {}
-```
-
-开启 `enableMarkDelete` 选项：
+如何开启 `enableMarkDelete` 选项：
 
 ```ts
 let useTree = new TableTree<ITreeNode>(table, {
     enableMarkDelete: true,
 })
 ```
+
+### 移动节点 `moveNodes()`
+
+@import "../../src/extension/tree/core/moveNodes.ts" @doc=moveNodes
+
+### 列出子节点 `listNodes()`
+
+@import "../../src/extension/tree/core/listNodes.ts" @doc=listNodes
+
+### 列出子节点（游标） `listNodesByCursor()`
+
+@import "../../src/extension/tree/core/listNodesByCursor.ts" @doc=listNodesByCursor
+
+### 预覆盖节点 `preOverwriteNodes()`
+
+@import "../../src/extension/tree/core/preOverwriteNodes.ts" @doc=preOverwriteNodes

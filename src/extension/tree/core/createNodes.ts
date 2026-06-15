@@ -20,8 +20,8 @@ export interface ITreeCreateResult {
 
 /** 创建节点
  *
- * 只能在指定的父节点下创建节点，
- * 所有创建的节点都会强制设置 parentId
+ * 在指定的父节点下批量创建新节点。
+ * 所有创建的节点都将自动归属到指定的 parentId 下。
  *
  */
 export async function createNodes(
