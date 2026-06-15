@@ -9,174 +9,196 @@ icon: ri-node-tree
 
 ## 概念
 
-### 节点修改计数 `modif`
+### 修改计数 `modif`、`cmodif`
 
-目录树中的每个节点都有一个 `modif` 字段，表示该节点的修改计数。每当节点被修改时，`modif` 值会自动递增。通过 `modif` 字段，你可以简单地判断一个节点是否被修改过。
+目录树里的每个节点都有 `modif` 和 `cmodif` 两个字段，通常是用节点修改时间的毫秒数。
+`modif` 记录节点本身的修改；`cmodif` 记录当前节点的后代节点的修改计数。
 
-与 Table 自动维护的 `_updateDate` 不同，`modif` 是可控的，可以根据业务逻辑选择性地修改。
+在客户端通过与线上数据对比 `modif`，能非常轻松地判断一个节点到底有没有变过，是否需要更新。通过 `cmodif` 可以判断文件夹子级是否有变更。
 
-`modif` 包含了系统修改和用户修改，因此它不适合作为给用户看的「更新时间」，例如不能直接拿它表达排序更新时间。
+每一个 tree API 方法都只有一个新 `modif` 值，也就是说像 `setNodes()` 这样的方法，每次执行改变的多个节点，其 `modif` 都相同。
+
+它们由系统自动维护，也可以手动修改，具体见 [自动维护树结构属性](#自动维护树结构属性)。
+
+#### 为什么要用 `modif`？
+
+> [!NOTE] 注意事项
+>
+> - **与更新时间的区别**：它和数据库那种死板的“最后修改时间 (`_updateDate`)”不太一样，`modif` 是完全受控的，你可以根据业务逻辑，灵活决定在什么情况下才增加这个计数。
 
 ### 可控排序 `index`
 
 目录树中的每个节点都有一个 `index` 字段，表示该节点在同级节点中的排序位置，它通常用在给用户手动拖拽排序。
 
-当前实现使用数值型分数索引：在两侧节点之间插入时，会给新节点分配一个落在上下界之间的数值，因此通常只需要修改当前节点自己的 `index`。
+`index` 是一个使用 [indexless](https://www.npmjs.com/package/indexless) 库实现的分数索引（Fractional Indexing），使用字符串类型存储，依靠字符串特性进行排序。
 
-为了避免不需要排序时引入额外写入，`index` 默认只会在两种情况下写入：
+使用分数索引的好处是每次拖拽排序、插入元素时，都只需要修改当前节点的 `index` 字段即可，不用修改前后节点的 `index`。同时可以直接用字符串顺序来进行排序，在各个数据库或者编程语言中都能非常轻松的进行排序。
 
-- 显式使用插入定位能力
-- 目标父节点已经进入索引模式，此时新的追加写入会自动分配末尾 `index`，以保持顺序稳定
+但是分数索引也有代价，在一个位置不断的进行排序会导致 `index` 长度不断增加。为了限制 `index` 长度，实际上系统会在后台进行[智能重排 (smartRebalance)](https://www.npmjs.com/package/indexless?activeTab=readme#%E9%87%8D%E5%88%86%E5%B8%83) 。每一次进行 `index` 涉及的更新，都会同时进行智能重排。
 
-在 Mongodb 和 SQLite 中，空字符串排在 `A` 之前。
+#### 排序操作
 
-## 当前能力
+- **新建、移动节点位置** 用户可以指定插入位置（插入到开头/末尾/某个节点的后面/某个节点的前面），如果用户没有指定，会依照父节点是否有 `lastChildIndex` 属性，如果有意味着父节点已经有排序需求，则会默认追加到末尾，如果没有则会把 `index` 设置为空字符串
 
-当前 `TableTree` 已经提供以下树操作：
+- **更新 `index`** 如果任何更新涉及到修改目标节点位置的情况，会触发[智能重排 (smartRebalance)](https://www.npmjs.com/package/indexless?activeTab=readme#%E9%87%8D%E5%88%86%E5%B8%83)，并且根据情况修改父节点 `lastChildIndex` 的值
 
-- `createNodes(nodes, parentId, options)`：在指定父节点下创建节点
-- `listNodes(parentId, options)`：分页获取直属子节点
-- `listNodesByCursor(parentId, options)`：游标分页获取直属子节点
-- `listAllNodes(parentId, options)`：按深度优先顺序扁平获取全部子孙节点
-- `checkNodes(nodes, targetId, options)`：预检目标位置按当前覆盖策略实际会影响到的目标节点
-- `setNodes(nodes, options)`：批量设置节点，支持覆盖策略和批量排序定位
-- `copyNodes(srcNodeIds, parentId, options)`：复制节点，支持深拷贝、根节点自动重命名和根节点插入定位
-- `moveNodes(nodeIds, parentId, options)`：移动节点，支持覆盖策略和同级重排
-- `deleteNodes(nodeIds, options)`：递归删除节点，支持标记删除
-- `unDeleteNodes(nodeIds)`：恢复标记删除的节点子树
-- `updateNodes(filter, updateOp, options)`：更新节点，支持递归更新整棵子树
+- **手动拖拽排序** 通常由客户端进行手动排序的实现，对于后端来说只用简单的修改目标节点的`index` 即可。
 
-这些能力由 [src/extension/tree/TableTree.ts](src/extension/tree/TableTree.ts) 暴露，对应的核心实现位于：
+> [!NOTE] 注意事项
+> 在 Mongodb 和 SQLite 中，空字符串排在 `A` 之前。
 
-- [src/extension/tree/core/createNodes.ts](src/extension/tree/core/createNodes.ts)
-- [src/extension/tree/core/listNodes.ts](src/extension/tree/core/listNodes.ts)
-- [src/extension/tree/core/checkNodes.ts](src/extension/tree/core/checkNodes.ts)
-- [src/extension/tree/core/setNodes.ts](src/extension/tree/core/setNodes.ts)
-- [src/extension/tree/core/copyNodes.ts](src/extension/tree/core/copyNodes.ts)
-- [src/extension/tree/core/moveNodes.ts](src/extension/tree/core/moveNodes.ts)
-- [src/extension/tree/core/deleteNodes.ts](src/extension/tree/core/deleteNodes.ts)
-- [src/extension/tree/core/unDeleteNodes.ts](src/extension/tree/core/unDeleteNodes.ts)
-- [src/extension/tree/core/updateNodes.ts](src/extension/tree/core/updateNodes.ts)
+#### `index` 更新选项
 
-## 自动维护字段
+@import "../../src/extension/tree/tree.types.ts" @only=ITreeIndexOptions @full
 
-目录树会自动维护下面这些内部字段：
+在创建、移动、更新操作中使用 `options.index` 参数可以控制如何更新节点的 `index` 值。`prevNodeId`、`nextNodeId` 用来把节点插入到已有节点的前后位置。`toStart`、`toEnd` 用来把节点插入到同级节点列表的开头或末尾。
 
-- `csize`：全部后代节点的总大小，不含当前节点自身 `size`
-- `ctotal`：全部后代节点总数，包含目录和文件
-- `cftotal`：全部后代文件总数
-- `clidLastIndex`：当前目录节点已分配给直属子节点的最后一个追加索引
+### 自动维护树结构属性
 
-这些字段都只允许内部维护，外部写入会被忽略或拒绝。其中 `csize` / `ctotal` / `cftotal` 的维护逻辑集中在 [src/extension/tree/core/treeStats.ts](src/extension/tree/core/treeStats.ts)，`clidLastIndex` 则由排序写路径在追加子节点时自动推进。
+为了实现方便的目录树功能，TableTree 会自动维护下面这些内部字段：
 
-## 排序与插入定位
+- `modif`：节点更新计数
+- `cmodif`：子节点更新计数
+- `ctotal`：全部后代节点的总数，包含文件夹(`isDir:true`) 和文件节点
+- `cftotal`：全部后代节点仅包含文件的总数（不包含文件夹）
+- `csize`：全部后代节点的大小（`size`）总和（不包含当前节点自身 `size` 字段的值）
+- `clidLastIndex`：子节点中 `index` 值最大的一个值。当新建、插入操作时可以使用此属性快速的设置子节点的 `index`。
 
-当前目录树已经支持一套统一的 `index` 定位语义：
+这些字段通常都只允许内部维护，外部写入会被忽略（`modif`、`cmodif` 允许修改）。
 
-- `toStart`：插入到同级开头
-- `toEnd`：插入到同级末尾
-- `prevNodeId`：插入到指定节点之后
-- `nextNodeId`：插入到指定节点之前
+#### 维护策略
 
-目前这些能力分别覆盖到：
+节点更新、删除、新建操作时会记录被更新的节点的 `id`, `parentId`、`size` 变化量、删除数等信息，提供给单独的 `treeMetadataRefresh()` 方法进行统一的树结构属性刷新。这个方法会沿着被更新节点的祖先链路，逐层更新 `cmodif`、`ctotal`、`cftotal`、`csize` 和 `clidLastIndex` 等字段。
 
-- `createNodes()`：支持以上 4 种定位方式
-- `moveNodes()`：支持跨父节点插入和同父节点内重排
-- `copyNodes()`：当前支持根节点级别的 `prevNodeId` 定位
-- `setNodes()`：当前支持同一父节点下的批量写入和重排
+> [!NOTE] 值得注意的逻辑
+>
+> - 如果一个节点的 `cmodif` 被更新了，那么它的父节点的 `cmodif` 也会被更新
+> - `cmodif`,`clidLastIndex` 被更新不会直接导致 `modif` 的更新，只有当节点本身被修改了才会更新 `modif`。
+> - 当节点的 `ctotal` 和 `csize` 的更新会导致 `modif` 的更新。
 
-当某个父节点已经进入索引模式后，后续没有显式传入 `index` 选项的新建、复制、跨父节点移动、写入新节点，也会默认按末尾追加分配 `index`，避免无索引新节点打乱既有顺序。
+### 节点覆盖选项
 
-另外，目录节点上的 `clidLastIndex` 现在已经作为内部状态启用：当子节点被追加到末尾时，目录树会自动推进这个值，作为后续 append 场景的最后分配索引记录，避免每次都从头推断末尾位置。
+覆盖选项主要用于 `checkNodes()`、`setNodes()`、`moveNodes()` 这类会把节点写入到目标父节点下的操作。它会在目标父节点的直属子节点中按 `uniqueBy` 查找冲突节点，再按 `overwriteMode` 决定覆盖、合并、跳过或改名。
 
-读取行为也已经和 `index` 联动：
+@import "../../src/extension/tree/tree.types.ts" @only=ITreeOverwriteOptions @full
 
-- 当某个父节点下已经存在有效 `index` 时，`listNodes()` 和 `listAllNodes()` 会按 `index` 再按 `id` 返回
-- 当该父节点下没有任何有效 `index` 时，会保留原来的自然顺序，不强制切换到排序模式
+#### 冲突唯一键 `uniqueBy`
 
-## 覆盖策略
+`uniqueBy` 用来定义“什么算冲突”。默认按节点 `id`，常用的是 `name`，也可以点路径指定节点任意键如 `meta.hash_md5`
 
-### `moveNodes()`
+#### 覆盖模式 `overwriteMode`
 
-当前 `moveNodes()` 已支持以下覆盖行为：
+`overwriteMode` 控制命中冲突节点后的处理方式：
 
-- `replace`：删除目标父节点下的冲突节点，再移动源节点
-- `newName`：当目标下存在同名节点时，自动重命名为 `名称 (1)`、`名称 (2)` 这类形式后再移动
-- `merge`：当源节点和目标冲突节点都是目录时，递归把源目录子节点并入目标目录
-- `mergeByModif`：目录仍然递归合并；如果遇到非目录冲突，则只有源节点 `modif` 更大时才覆盖，否则跳过
+- `replace`： 删除已存在的冲突节点，再写入新节点，这是默认模式。
 
-当前行为特点：
+- `skip`：跳过已存在的冲突节点，不写入新节点。
 
-- 冲突检测默认只看目标父节点下的直属节点
-- `newName` 目前只支持按 `name` 检测冲突
-- 当文件要覆盖目录时，默认会跳过，除非显式开启 `enableFileOverwriteDir`
-- 如果同时传入 `index` 选项，会先完成冲突处理，再给最终真的要落到目标父节点下的根节点分配新顺序
+- `merge`：删除已存在的冲突节点，再写入新节点；但如果冲突节点和新节点都是文件夹节点，则不删除冲突节点，而是把它们的子节点进行合并（如果子节点也有冲突则继续按 merge 规则进行处理）。相当于目录的递归合并。
 
-### `setNodes()`
+- `mergeByModif`：类似 `merge`，处理冲突节点时不是用新节点直接覆盖已存在节点，而是判断节点 `modif` 的大小，保留 `modif` 较大的节点。
 
-当前 `setNodes()` 已支持以下覆盖行为：
+- `newName`：不覆盖目标节点，而是为源节点生成新名称，例如 `文件.txt (1)`、`文件.txt (2)`，然后继续写入或移动。
 
-- `replace`：删除目标父节点下的冲突节点，再执行写入
-- `newName`：当目标下存在同名节点时，自动改名后写入
-- `merge`：如果写入目录与目标目录冲突，会折叠到目标目录，并把子节点改挂到目标目录下
-- `mergeByModif`：与 `merge` 类似，但只有源目录 `modif` 更大时才覆盖目标目录元数据；子节点冲突仍按 `modif` 决定覆盖或跳过
+> [!NOTE] 注意事项
+>
+> - 如果是 `replace` 模式，且已存在的冲突节点是文件夹节点，则会删除整个文件夹（遵守 Table 的删除逻辑，可能是标记删除），请谨慎使用。
 
-当前行为特点：
+#### 同名冲突添加后缀规则
 
-- 同批次写入允许子节点引用本批次中的父节点
-- 目录合并时，内部会先建立目录映射，再处理子节点写入
-- `newName` 同样只支持按 `name` 检测冲突
-- `index` 目前只支持“最终落到同一父节点下”的批量写入；如果一批节点会落到多个父节点，会直接报错
+如果遇到同名冲突，并且覆盖模式是 `newName`，则会在新节点名称后添加 ` (1)`、` (2)` 等后缀来生成新的名称，直到没有同名冲突为止。
 
-### `checkNodes()`
+要注意的是如果文件名是 `文件(2).txt`，会识别出已有的 `(2)` 后缀，并在数字基础上继续递增，例如 `文件(2).txt` -> `文件(3).txt`，而不是 `文件(2) (1).txt`。
 
-当前 `checkNodes()` 会直接复用 `moveNodes()` / `setNodes()` 的覆盖选项：
+#### 文件覆盖文件夹
 
-- `replace`：返回实际会被替换的目标节点
-- `newName`：返回空数组，因为实际执行时不会覆盖目标节点，而是改名后写入
-- `merge`：如果命中目录对目录冲突，会返回将被合并的目标目录；如果源节点里包含子树，还会继续递归返回深层会受影响的目标节点
-- `mergeByModif`：与 `merge` 类似，但会跳过 `modif` 更大或相等的目标节点，因此返回结果只包含真正会被覆盖或合并的节点
+当源节点是文件（`isDir: false`），目标冲突节点是目录（`isDir: true`）时，默认不会让文件覆盖目录，单个源文件会被跳过。如果需要允许文件覆盖目录，可以在选项里开启 `enableFileOverwriteDir`，此时会直接删除目标目录（及其子树）再写入源文件。
 
-当前行为特点：
+---
 
-- 它返回的是“按当前覆盖策略实际会影响到的目标节点”，而不是“所有重名节点”
-- 当源节点是目录并且发生目录合并时，会继续递归预检深层子节点冲突
-- 如果直接传入一批待写入节点，会优先按这批节点自身的父子关系递归预检
-- 如果某个目录节点在本批输入里没有带出子节点，当前会继续读取它在表里的现有子树做递归预检，因此混合批次场景也能继续下钻
-- 当文件将覆盖目录且没有开启 `enableFileOverwriteDir` 时，会视为“实际不会覆盖”，因此不会出现在返回结果里
+## 接口
 
-### `copyNodes()`
+### 创建节点 `createNodes()`
 
-当前 `copyNodes()` 已支持以下行为：
+在指定的父节点下批量创建新节点。所有创建的节点都将自动归属到指定的 `parentId` 下。
 
-- 支持根节点复制时自动重命名
-- 支持递归复制整棵子树
-- 支持通过 `prevNodeId` 把复制出来的根节点插入到目标父节点下的指定位置
-- 当复制结果追加到非根父节点末尾时，会同步推进目标目录的 `clidLastIndex`
+```typescript
+export async function createNodes(
+    this: TableTree<ITreeNode>,
+    /** 要创建的节点文档 */
+    nodes: Partial<ITreeNode>[],
+    /** 父级节点 id ，如果为 "/" 表示根节点 */
+    parentId: string,
+    options?: ITreeCreateNodesOptions,
+): Promise<ITreeCreateResult> {}
+```
 
-当前行为特点：
+### 更新节点 `updateNodes()`
 
-- `prevNodeId` 只作用于根节点层级
-- 如果一次复制多个根节点，后续根节点会顺次接在前一个新副本之后
-- 子节点仍然按复制出的新父节点继续创建，不会继承根节点的插入定位参数
+相比于 `setNodes()` , `updateNodes()` 是一个更底层的接口，提供了更灵活的更新能力。它接受一个过滤器参数 `filter` 来指定要更新哪些节点，以及一个更新操作参数 `updateOp` 来定义如何更新这些节点。
 
-### `updateNodes()`
+这意味着 `updateNodes()` 的资源消耗是不确定的，通常来说不会公开给客户端直接调用。
 
-当前 `updateNodes()` 已支持以下行为：
+```typescript
+export async function updateNodes(
+    this: TableTree<ITreeNode>,
+    filter: ITableFilter,
+    updateOp: ITableUpdateOp<ITreeNode>,
+    options?: ITreeUpdateNodesOptions,
+): Promise<ITreeChangeResult> {}
+```
 
-- 默认只更新直接命中的节点
-- `deep: true`：先把直接命中的节点扩展成整棵子树，再统一执行递归更新
-- 如果更新内容会影响 `size` / `isDir` 这类统计贡献，祖先节点的 `csize` / `ctotal` / `cftotal` 会自动刷新
+### 设置节点数据 `setNodes()`
 
-当前行为特点：
+`setNodes()` 提供了简单的方式来创建或更新节点数据。它接受一个节点数据数组 `nodes`，可以根据数据更新或者创建节点。它的资源消耗是确定可控的，就是每个节点对应一次更新或创建操作。
 
-- 不允许通过 `updateNodes()` 修改 `parentId`，需要改用 `moveNodes()`
-- 不允许外部修改 `csize` / `ctotal` / `cftotal`
+可以通过 `options.onlyUpdate` 选项来控制 `setNodes()` 只能更新已有节点而不创建新节点，避免更新已删除除节点时误创建新节点。
 
-## 当前限制
+在 `setNodes()` 中可以使用覆盖选项来控制当目标位置有冲突节点时的处理方式，覆盖选项包括 `uniqueBy` 和 `overwriteMode`，具体见 [节点覆盖选项](#节点覆盖选项)。
 
-以下能力目前仍然是后续可继续增强的方向：
+```ts
+export async function setNodes(
+    this: TableTree<ITreeNode>,
+    nodes: Partial<ITreeNode>[],
+    options?: ITreeSetNodesOptions,
+): Promise<ITreeChangeResult & Partial<ITreePreSyncNodeResult>> {}
+```
 
-- 当前仍然主要依赖数值型 `index` 作为第一版排序方案，`clidLastIndex` 只用于记录末尾追加时的最后分配索引，还没有扩展成完整的排序元数据体系
+#### 预同步
 
-因此目前目录树已经可以作为“结构正确、统计正确、覆盖策略和排序策略都可用”的树形文档模型来使用；如果你的场景依赖更细粒度的排序元数据维护，下一步可以继续扩展 `clidLastIndex` 之类的能力。
+当进行 `setNodes()` 操作时会对节点进行修改，此时客户端上的节点可能已经过时了，为了让客户端可以知道此次操作前数据是否已经过时，就可以用 `presync` 选项来进行预同步。
+
+客户端提供 `oldModif` 或 `oldCmodif` 两个值，服务端会把它们和当前数据的 `modif` 和 `cmodif` 进行对比，把结果在 `setNodes()` 结果中返回。
+
+### 删除节点 `deleteNodes()`
+
+删除指定节点及其子树。可以通过 `options.deep` 参数控制是否递归删除子节点。
+
+```ts
+export async function deleteNodes(
+    this: TableTree<ITreeNode>,
+    /** 要删除的节点 id 列表 */
+    nodeIds: string[],
+    options?: ITreeDeleteNodesOptions,
+): Promise<ITreeDeleteResult>
+```
+
+### 恢复删除的节点 `unDeleteNodes()`
+
+如果 TableTree 设置了 `enableMarkDelete: true`，则删除节点时会把节点标记为已删除而不是直接从数据库中删除，这时就可以通过 `unDeleteNodes()` 方法来恢复这些被标记为已删除的节点。
+
+```ts
+export async function unDeleteNodes(
+    this: TableTree<ITreeNode>,
+    nodeIds: string[],
+    options?: ITreeUnDeleteNodesOptions,
+): Promise<void> {}
+```
+
+开启 `enableMarkDelete` 选项：
+
+```ts
+let useTree = new TableTree<ITreeNode>(table, {
+    enableMarkDelete: true,
+})
+```

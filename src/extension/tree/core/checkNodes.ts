@@ -1,7 +1,22 @@
 import type { TableTree } from "../TableTree"
-import type { ITreeNode } from "../tree.types"
-import type { ICheckNodesResult, ITreeCheckNodesOptions, ITreeWritableNodePatch } from "./treeCore.types"
+import type { ITreeNode, ITreeOverwriteOptions } from "../tree.types"
+import type { ITreeWritableNodePatch } from "./treeCore.types"
 import { stripManagedTreeStatsFromPatch } from "./treeWriteGuards"
+import { getValueByPath, normalizeNodeModif } from "../lib/treeUtils"
+
+/** 检测节点冲突的选项
+ *
+ * 这里直接复用树覆盖策略选项，保证 checkNodes 的预检语义与 moveNodes / setNodes 一致。
+ */
+export type ITreeCheckNodesOptions = ITreeOverwriteOptions
+
+/** 检测节点冲突的结果 */
+export interface ICheckNodesResult<TNode extends ITreeNode = ITreeNode> {
+    /** 是否存在冲突 */
+    isConflict: boolean
+    /** 已存在的节点列表 */
+    existNodes: Partial<TNode>[]
+}
 
 /**
  * 检测节点是否存在
@@ -274,20 +289,3 @@ function filterAffectedNodesByOverwriteMode(
     return existNodes
 }
 
-function normalizeNodeModif(modif: unknown): number {
-    return typeof modif === "number" && !Number.isNaN(modif) ? modif : 0
-}
-
-function getValueByPath(source: Record<string, any>, path: string): any {
-    const pathList = path.split(".")
-    let currentValue: any = source
-
-    for (const key of pathList) {
-        if (currentValue == null || typeof currentValue !== "object") {
-            return undefined
-        }
-        currentValue = currentValue[key]
-    }
-
-    return currentValue
-}

@@ -1,7 +1,16 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
-import type { ITreeCopyNodesOptions } from "./treeCore.types"
 import { stripManagedTreeStatsFromPatch } from "./treeWriteGuards"
+
+/** 复制节点选项 */
+export interface ITreeCopyNodesOptions {
+    /** 新节点插入到该节点之后 */
+    prevNodeId?: string
+    /** 是否递归复制子节点 */
+    deep?: boolean
+    /** 复制后的节点是否自动重命名 */
+    renameOnCopy?: boolean
+}
 
 /** 复制节点
  */

@@ -1,7 +1,13 @@
 import type { TableTree } from "../TableTree"
-import type { ITreeNode } from "../tree.types"
-import type { ITreeMoveNodesOptions } from "./treeCore.types"
+import type { ITreeNode, ITreeOverwriteOptions, ITreeIndexOptions } from "../tree.types"
 import { createTreeIndexRange, hasTreeIndexedOrder, normalizeTreeSiblingIndexes, persistTreeParentLastIndex } from "./treeIndex"
+import { collectSubtreeNodeIds, getValueByPath, normalizeNodeModif } from "../lib/treeUtils"
+
+/** 移动节点选项 */
+export interface ITreeMoveNodesOptions extends ITreeOverwriteOptions {
+    /** 自动更新排序索引配置 */
+    index?: ITreeIndexOptions
+}
 import { applyTreeStatsDeltaToAncestors, collectTreeAncestorIds, getTreeNodeStatsContribution } from "./treeStats"
 import { deleteNodes } from "./deleteNodes"
 
@@ -224,7 +230,7 @@ async function resolveMoveConflict(
         return { action: "move", patch: {} }
     }
 
-    const sourceValue = getMoveNodeValueByPath(rootNode as Record<string, any>, uniqueBy)
+    const sourceValue = getValueByPath(rootNode as Record<string, any>, uniqueBy)
     if (sourceValue === undefined || sourceValue === null) {
         return { action: "move", patch: {} }
     }
@@ -266,8 +272,8 @@ async function resolveMoveConflict(
     }
 
     if (options?.overwriteMode === "mergeByModif") {
-        const sourceModif = normalizeTreeNodeModif(rootNode.modif)
-        const targetMaxModif = Math.max(...filteredConflictNodes.map((node) => normalizeTreeNodeModif(node.modif)))
+        const sourceModif = normalizeNodeModif(rootNode.modif)
+        const targetMaxModif = Math.max(...filteredConflictNodes.map((node) => normalizeNodeModif(node.modif)))
         if (sourceModif <= targetMaxModif) {
             return { action: "skip" }
         }
@@ -281,19 +287,7 @@ async function resolveMoveConflict(
     return { action: "move", patch: {} }
 }
 
-function getMoveNodeValueByPath(source: Record<string, any>, path: string): any {
-    const pathList = path.split(".")
-    let currentValue: any = source
 
-    for (const key of pathList) {
-        if (currentValue == null || typeof currentValue !== "object") {
-            return undefined
-        }
-        currentValue = currentValue[key]
-    }
-
-    return currentValue
-}
 
 async function mergeTreeNode(
     this: TableTree<ITreeNode>,
@@ -316,9 +310,6 @@ async function mergeTreeNode(
     await deleteNodes.call(this, [sourceNode.id])
 }
 
-function normalizeTreeNodeModif(modif: unknown): number {
-    return typeof modif === "number" && !Number.isNaN(modif) ? modif : 0
-}
 
 async function createMoveName(
     this: TableTree<ITreeNode>,
@@ -347,41 +338,4 @@ async function createMoveName(
 
     reservedNames.add(nextName)
     return nextName
-}
-
-/**
- * 收集一棵子树内的全部节点 id，包含根节点自身。
- *
- * moveNodes 需要用它判断是否把节点移动到了自己的子孙节点下。
- */
-async function collectSubtreeNodeIds(
-    this: TableTree<ITreeNode>,
-    rootNodeId: string,
-): Promise<string[]> {
-    const visitedIds = new Set<string>()
-    const queue = [rootNodeId]
-
-    while (queue.length > 0) {
-        const currentNodeId = queue.shift()!
-        if (visitedIds.has(currentNodeId)) {
-            continue
-        }
-
-        visitedIds.add(currentNodeId)
-
-        const children = await this.findMany(
-            { parentId: currentNodeId },
-            {
-                projection: ["id"],
-            },
-        )
-
-        for (const child of children) {
-            if (!visitedIds.has(child.id)) {
-                queue.push(child.id)
-            }
-        }
-    }
-
-    return Array.from(visitedIds)
 }

@@ -1,16 +1,72 @@
 import type { TableTree } from "../TableTree"
 import type { ITableFilter } from "../../../core/types"
 import type { ITableFindOptions } from "../../../adapter/adapter"
-import type {
-    ITreeListAllNodesCursor,
-    ITreeListAllNodesOptions,
-    ITreeListAllNodesResult,
-    ITreeListNodesByCursorOptions,
-    ITreeListNodesByCursorResult,
-    ITreeListNodesOptions,
-    ITreeListNodesResult,
-} from "./treeCoreTypes"
 import type { ITreeNode } from "../tree.types"
+import type { ICursorPagingOptions, IReCursorPaging, IReSkipPaging, ISkipPagingOptions } from "../../../core/list"
+
+/** 子节点分页查询选项（skip/limit） */
+export interface ITreeListNodesOptions extends ISkipPagingOptions {
+    /** 仅返回指定类型的节点 */
+    onlyTypes?: string[]
+    /** 排除指定类型的节点 */
+    onlyNotTypes?: string[]
+    /** 是否忽略标记删除 */
+    ignoreMarkDelete?: boolean
+}
+
+/** 子节点分页查询结果（skip/limit） */
+export type ITreeListNodesResult<TNode extends ITreeNode = ITreeNode> = IReSkipPaging<TNode>
+
+/** 子节点分页查询选项（cursor） */
+export interface ITreeListNodesByCursorOptions extends ICursorPagingOptions {
+    /** 仅返回指定类型的节点 */
+    onlyTypes?: string[]
+    /** 排除指定类型的节点 */
+    onlyNotTypes?: string[]
+}
+
+/** 子节点分页查询结果（cursor） */
+export type ITreeListNodesByCursorResult<TNode extends ITreeNode = ITreeNode> = IReCursorPaging<TNode>
+
+/** 深度遍历分页游标
+ *
+ * 这里只约束遍历恢复所需的最小信息，
+ * 后续真正实现时可以继续补充字段，但不应破坏既有含义。
+ */
+export interface ITreeListAllNodesCursor {
+    /** 上一批结果的最后一个节点 ID */
+    lastNodeId?: string
+    /** 上一批结果最后一个节点的深度 */
+    depth?: number
+    /** 当前游标所属的父节点 ID */
+    parentId?: string
+}
+
+/** 获取全部子孙节点的分页选项 */
+export interface ITreeListAllNodesOptions {
+    /** 每页数量 */
+    pageSize?: number
+    /** 深度遍历游标 */
+    cursor?: ITreeListAllNodesCursor
+    /** 仅返回指定类型的节点 */
+    onlyTypes?: string[]
+    /** 排除指定类型的节点 */
+    onlyNotTypes?: string[]
+    /** 投影字段 */
+    projection?: string[] | Record<string, 1 | -1>
+    /** 是否忽略标记删除 */
+    ignoreMarkDelete?: boolean
+}
+
+/** 获取全部子孙节点的分页结果 */
+export interface ITreeListAllNodesResult<TNode extends ITreeNode = ITreeNode> {
+    /** 扁平化节点列表 */
+    list: TNode[]
+    /** 下一页游标 */
+    nextCursor: ITreeListAllNodesCursor | null
+    /** 是否还有下一页 */
+    hasNext: boolean
+}
 
 /** 获取一个节点的子节点（基于 skip limit）
  *
