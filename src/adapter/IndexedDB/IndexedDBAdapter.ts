@@ -428,7 +428,7 @@ class IndexedDBAdapterInstance implements ITableDBAdapterInstance {
             finalDocs = results.slice(offset, offset + limit)
         }
 
-        const proj = normalizeProjection(options?.projection)
+        const proj = normalizeProjection(options?.projection as any)
 
         let isOnlyIdInclusion = false
         if (proj) {

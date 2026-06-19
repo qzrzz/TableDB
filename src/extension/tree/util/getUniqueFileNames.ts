@@ -8,5 +8,34 @@
 
  * 
  * @param oldNames 原文件名
+ * @param existsNames 已经占用的文件名
  */
-export async function getUniqueFileNames(oldNames: string[]): Promise<string[]> {}
+export async function getUniqueFileNames(oldNames: string[], existsNames: string[] = []): Promise<string[]> {
+    const usedNames = new Set(existsNames)
+    const result: string[] = []
+
+    for (const oldName of oldNames) {
+        let nextName = oldName
+        while (usedNames.has(nextName)) {
+            nextName = increaseFileNameIndex(nextName)
+        }
+        usedNames.add(nextName)
+        result.push(nextName)
+    }
+
+    return result
+}
+
+function increaseFileNameIndex(fileName: string): string {
+    const dotIndex = fileName.lastIndexOf(".")
+    const hasExt = dotIndex > 0
+    const baseName = hasExt ? fileName.slice(0, dotIndex) : fileName
+    const extName = hasExt ? fileName.slice(dotIndex) : ""
+    const matched = baseName.match(/^(.*?)(?:\s*\((\d+)\))$/)
+
+    if (!matched) {
+        return `${baseName} (1)${extName}`
+    }
+
+    return `${matched[1]} (${Number(matched[2]) + 1})${extName}`
+}

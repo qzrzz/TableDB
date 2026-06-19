@@ -1,1 +1,1 @@
-export { TableTree } from "./TableTree"
+export { TableTree, defineTableTree } from "./TableTree"

@@ -1,8 +1,7 @@
 import type { TableTree } from "../TableTree"
 import type { ITableFilter } from "../../../core/types"
-import type { ITableFindOptions } from "../../../adapter/adapter"
 import type { ITreeNode } from "../tree.types"
-import type { ICursorPagingOptions, IReCursorPaging, IReSkipPaging, ISkipPagingOptions } from "../../../core/list"
+import type { IReSkipPaging, ISkipPagingOptions } from "../../../core/list"
 
 /** 子节点分页查询选项（skip/limit） */
 export interface ITreeListNodesOptions extends ISkipPagingOptions {
@@ -29,4 +28,26 @@ export function listNodes(
     /** 要获取的节点，可以用 '/' 表示根节点 */
     parentId: string,
     options?: ITreeListNodesOptions,
-): Promise<ITreeListNodesResult<ITreeNode>> {}
+): Promise<ITreeListNodesResult<ITreeNode>> {
+    const filter = buildTreeListFilter(parentId, options)
+    return this.listPaging(filter, {
+        ...options,
+        sort: options?.sort ?? { index: 1 },
+        ignoreMarkDelete: options?.ignoreMarkDelete,
+    }) as Promise<ITreeListNodesResult<ITreeNode>>
+}
+
+export function buildTreeListFilter(parentId: string, options?: ITreeListNodesOptions): ITableFilter {
+    const filter: Record<string, any> = {
+        ...(options?.filter as Record<string, any> | undefined),
+        parentId,
+    }
+
+    if (options?.onlyTypes?.length) {
+        filter.type = { $in: options.onlyTypes }
+    } else if (options?.onlyNotTypes?.length) {
+        filter.type = { $nin: options.onlyNotTypes }
+    }
+
+    return filter
+}

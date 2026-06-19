@@ -1,5 +1,7 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
+import { collectDescendantNodes } from "../util/collectDescendantNodes"
+import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
 
 /** 恢复节点选项 */
 export interface ITreeUnDeleteNodesOptions {}
@@ -29,4 +31,27 @@ export async function unDeleteNodes(
     options?: ITreeUnDeleteNodesOptions,
 ): Promise<void> {
     const uniqueNodeIds = Array.from(new Set(nodeIds))
+    if (uniqueNodeIds.length === 0) return
+
+    const nodes = await collectDescendantNodes(this, uniqueNodeIds, {
+        includeSelf: true,
+        ignoreMarkDelete: true,
+    })
+    if (nodes.length === 0) return
+
+    const modif = Date.now()
+    await this.updateMany(
+        { id: { $in: nodes.map((node) => node.id) }, _isDeleted: true } as any,
+        {
+            $set: { modif } as any,
+            $unset: { _isDeleted: true, _deleteDate: true } as any,
+        },
+        { upsert: false },
+    )
+
+    await refreshTreeMetadata(this, {
+        parentIds: Array.from(new Set(nodes.map((node) => node.parentId))),
+        nodeIds: nodes.map((node) => node.id),
+        cmodif: modif,
+    })
 }

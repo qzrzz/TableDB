@@ -27,4 +27,22 @@ export async function listNodesByCursor(
     /** 要获取的节点，可以用 '/' 表示根节点 */
     parentId: string,
     options?: ITreeListNodesByCursorOptions,
-): Promise<ITreeListNodesByCursorResult<ITreeNode>> {}
+): Promise<ITreeListNodesByCursorResult<ITreeNode>> {
+    const filter: Record<string, any> = {
+        ...(options?.filter as Record<string, any> | undefined),
+        parentId,
+    }
+
+    if (options?.onlyTypes?.length) {
+        filter.type = { $in: options.onlyTypes }
+    } else if (options?.onlyNotTypes?.length) {
+        filter.type = { $nin: options.onlyNotTypes }
+    }
+
+    return this.listPagingByCursor(filter, {
+        ...options,
+        sortKey: options?.sortKey ?? "id",
+        sortOrder: options?.sortOrder ?? 1,
+        ignoreMarkDelete: options?.ignoreMarkDelete,
+    }) as Promise<ITreeListNodesByCursorResult<ITreeNode>>
+}

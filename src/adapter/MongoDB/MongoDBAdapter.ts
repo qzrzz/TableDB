@@ -103,7 +103,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
         let query = jsToMongo(filter, true)
         if (query instanceof Promise) query = await query
         const mongoOptions: any = {
-            projection: buildProjection(options?.projection),
+            projection: buildProjection(options?.projection as any),
             collation: {},
         }
 
@@ -128,7 +128,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
         let query = jsToMongo(filter, true)
         if (query instanceof Promise) query = await query
         const mongoOptions: any = {
-            projection: buildProjection(options?.projection),
+            projection: buildProjection(options?.projection as any),
         }
 
         if (options) {

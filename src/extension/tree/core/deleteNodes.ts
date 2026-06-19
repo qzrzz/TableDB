@@ -1,5 +1,7 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
+import { collectDescendantNodes } from "../util/collectDescendantNodes"
+import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
 
 /** 删除节点选项 */
 export interface ITreeDeleteNodesOptions {
@@ -29,4 +31,47 @@ export async function deleteNodes(
     /** 要删除的节点 id 列表 */
     nodeIds: string[],
     options?: ITreeDeleteNodesOptions,
-): Promise<ITreeDeleteResult> {}
+): Promise<ITreeDeleteResult> {
+    const uniqueNodeIds = Array.from(new Set(nodeIds)).filter(Boolean)
+    if (uniqueNodeIds.length === 0) {
+        return { hasDeleted: false, hasChildDeleted: false, deletedCount: 0 }
+    }
+
+    const nodes = await collectDescendantNodes(this, uniqueNodeIds, {
+        includeSelf: true,
+        ignoreMarkDelete: true,
+    })
+    if (nodes.length === 0) {
+        return { hasDeleted: false, hasChildDeleted: false, deletedCount: 0 }
+    }
+
+    const deleteIds = nodes.map((node) => node.id)
+    const parentIds = Array.from(new Set(nodes.map((node) => node.parentId)))
+    const modif = Date.now()
+
+    if (options?.realDelete) {
+        await this.deleteMany({ id: { $in: deleteIds } }, { readDelete: true })
+    } else {
+        await this.updateMany(
+            { id: { $in: deleteIds } },
+            {
+                $set: {
+                    _isDeleted: true,
+                    _deleteDate: new Date(),
+                    modif,
+                } as any,
+            },
+        )
+    }
+
+    await refreshTreeMetadata(this, {
+        parentIds,
+        cmodif: modif,
+    })
+
+    return {
+        hasDeleted: true,
+        hasChildDeleted: nodes.some((node) => !uniqueNodeIds.includes(node.id)),
+        deletedCount: nodes.length,
+    }
+}

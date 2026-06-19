@@ -136,7 +136,7 @@ export function SQLiteAdapter(config: SQLiteAdapterConfig): ITableDBAdapter {
             }
 
             // 根据配置选择驱动
-            const synchronous = config.safe === "full" ? "FULL" : config.safe ? "NORMAL" : "OFF"
+            const synchronous: "FULL" | "NORMAL" | "OFF" = config.safe === "full" ? "FULL" : config.safe ? "NORMAL" : "OFF"
             const driverConfig = {
                 filename,
                 walMode: config.multi === true,
@@ -651,7 +651,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             debug.setDbExecTime(tEnd - tStart)
         }
 
-        const proj = normalizeProjection(options?.projection)
+        const proj = normalizeProjection(options?.projection as any)
 
         // 投影优化：如果仅请求 _id，直接返回无需反序列化
         if (proj) {

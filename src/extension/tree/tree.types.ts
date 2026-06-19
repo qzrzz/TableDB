@@ -25,7 +25,7 @@ export interface ITreeNode extends ITableDoc {
     /** 排序索引 (indexless 分数索引) */
     index?: string
     /** 子级排序序号（子级最后一个节点的序号） */
-    clidLastIndex?: number
+    childLastIndex?: string
     // 树结构数据 ---------------------
     /** 子级大小 （所有子级节点，不包括自身节点的大小） */
     csize: number
@@ -42,8 +42,6 @@ export interface ITreeNode extends ITableDoc {
  * 这些字段会被系统管理，用户无法自行修改。
  */
 export interface ITreeNodeMetadataKeys {
-    /** 节点尺寸（byte） */
-    size: number
     /** 子级总大小，不包含当前节点自身 size */
     csize: number
     /** 子级总数量，包含文件夹和文件 */

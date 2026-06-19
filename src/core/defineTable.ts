@@ -19,17 +19,26 @@ import { ITableOptions, Table } from "./Table"
  * // 如果要指定 adapter
  * const useCustomTable = defineTable({adapter : SQLiteAdapter({filename: ":memory:"})})
  */
-export function defineTable<TSchema extends ITableDoc = ITableDoc>(
-    tableOptions: ITableOptions<TSchema>
-): UseTalbeFunction<TSchema> {
+export function defineTable<
+    TSchema extends ITableDoc = ITableDoc,
+    TTable extends Table<TSchema> = Table<TSchema>
+>(
+    tableOptions: ITableOptions<TSchema>,
+    TableClass?: new (options: ITableOptions<TSchema>) => TTable
+): UseTableFunction<TSchema, TTable> {
     const { name } = tableOptions
 
     // 使用 Map 按 adapter 区分单例
-    const singletonMap = new Map<ITableDBAdapter | undefined, Table<TSchema>>()
+    const singletonMap = new Map<ITableDBAdapter | undefined, TTable>()
 
     let className = name + "Table"
+    const TargetClass = TableClass ?? (Table as any)
     let tempOb = {
-        [className]: class extends Table {},
+        [className]: class extends TargetClass {
+            constructor(options: any) {
+                super(options)
+            }
+        },
     }
 
     return async (options?: { adapter?: ITableDBAdapter }) => {
@@ -45,19 +54,32 @@ export function defineTable<TSchema extends ITableDoc = ITableDoc>(
             ? { ...tableOptions, adapter }
             : tableOptions
 
-        let Cls = tempOb[className]
+        let Cls = tempOb[className] as new (options: ITableOptions<TSchema>) => TTable
         let table = new Cls(mergedOptions)
         await table.inited
-        singletonMap.set(adapter, table as Table<TSchema>)
-        return table as Table<TSchema>
+        singletonMap.set(adapter, table as TTable)
+        return table as TTable
     }
 }
 
-export type UseTalbeFunction<TSchema extends ITableDoc = ITableDoc> = (opitons?: {
-    adapter?: ITableDBAdapter
-}) => Promise<Table<TSchema>>
+/** 兼容旧的拼写错误类型 */
+export type UseTalbeFunction<
+    TSchema extends ITableDoc = ITableDoc,
+    TTable extends Table<TSchema> = Table<TSchema>
+> = UseTableFunction<TSchema, TTable>
 
-/** 定义全局的数据库适配器（SQLite/MongoDB） */
+/** 定义使用 Table 函数的类型 */
+export type UseTableFunction<
+    TSchema extends ITableDoc = ITableDoc,
+    TTable extends Table<TSchema> = Table<TSchema>
+> = (options?: {
+    adapter?: ITableDBAdapter
+}) => Promise<TTable>
+
+/** 定义全局的数据库适配器（SQLite/MongoDB）
+ *
+ * @param adapter 数据库适配器实例
+ */
 export function defineGlobalDBAdapter(adapter: ITableDBAdapter) {
     Table.globalAdapter = adapter
 }

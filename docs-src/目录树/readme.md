@@ -42,9 +42,9 @@ icon: ri-node-tree
 
 #### 排序操作
 
-- **新建、移动节点位置** 用户可以指定插入位置（插入到开头/末尾/某个节点的后面/某个节点的前面），如果用户没有指定，会依照父节点是否有 `lastChildIndex` 属性，如果有意味着父节点已经有排序需求，则会默认追加到末尾，如果没有则会把 `index` 设置为空字符串
+- **新建、移动节点位置** 用户可以指定插入位置（插入到开头/末尾/某个节点的后面/某个节点的前面），如果用户没有指定，会依照父节点是否有 `childLastIndex` 属性，如果有意味着父节点已经有排序需求，则会默认追加到末尾，并重写 `childLastIndex`，如果没有则会把 `index` 设置为空字符串（`createNodes`, `copyNodes`,`setNodes`,`moveNodes`）
 
-- **更新 `index`** 如果任何更新涉及到修改目标节点位置的情况，会触发[智能重排 (smartRebalance)](https://www.npmjs.com/package/indexless?activeTab=readme#%E9%87%8D%E5%88%86%E5%B8%83)，并且根据情况修改父节点 `lastChildIndex` 的值
+- **更新 `index`** 如果任何更新涉及到修改目标节点位置的情况，会触发[智能重排 (smartRebalance)](https://www.npmjs.com/package/indexless?activeTab=readme#%E9%87%8D%E5%88%86%E5%B8%83)，并且根据情况修改父节点 `childLastIndex` 的值
 
 - **手动拖拽排序** 通常由客户端进行手动排序的实现，对于后端来说只用简单的修改目标节点的`index` 即可。
 
@@ -66,18 +66,20 @@ icon: ri-node-tree
 - `ctotal`：全部后代节点的总数，包含文件夹(`isDir:true`) 和文件节点
 - `cftotal`：全部后代节点仅包含文件的总数（不包含文件夹）
 - `csize`：全部后代节点的大小（`size`）总和（不包含当前节点自身 `size` 字段的值）
-- `clidLastIndex`：子节点中 `index` 值最大的一个值。当新建、插入操作时可以使用此属性快速的设置子节点的 `index`。
+- `childLastIndex`：子节点中 `index` 值最大的一个值。当新建、插入操作时可以使用此属性快速的设置子节点的 `index`。（如果所有子节点 index 都是 ""，`childLastIndex` 是 `undefined`或无此字段）
 
-这些字段通常都只允许内部维护，外部写入会被忽略（`modif`、`cmodif` 允许修改）。
+这些字段通常都只允许内部维护，外部写入会被忽略（`modif`、`cmodif` 允许用户修改，如果用户指定了以用户的为准）。
+
+被删除的节点不在 `ctotal`,`cftotal`,`csize` 的统计范围，如果 `unDeleteNodes()` 会正确更新这些属性。
 
 #### 维护策略
 
-节点更新、删除、新建操作时会记录被更新的节点的 `id`, `parentId`、`size` 变化量、删除数等信息，提供给单独的 `treeMetadataRefresh()` 方法进行统一的树结构属性刷新。这个方法会沿着被更新节点的祖先链路，逐层更新 `cmodif`、`ctotal`、`cftotal`、`csize` 和 `clidLastIndex` 等字段。
+节点更新、删除、新建操作时会记录被更新的节点的 `id`, `parentId`、`size` 变化量、删除数等信息，提供给单独的 `treeMetadataRefresh()` 方法进行统一的树结构属性刷新。这个方法会沿着被更新节点的祖先链路，逐层更新 `cmodif`、`ctotal`、`cftotal`、`csize` 和 `childLastIndex` 等字段。
 
 > [!NOTE] 值得注意的逻辑
 >
-> - 如果一个节点的 `cmodif` 被更新了，那么它的父节点的 `cmodif` 也会被更新
-> - `cmodif`,`clidLastIndex` 被更新不会直接导致 `modif` 的更新，只有当节点本身被修改了才会更新 `modif`。
+> - 如果一个节点的 `modif` 被更新了，那么它的父节点链上全部祖先的 `cmodif` 都会被更新
+> - `cmodif`,`childLastIndex` 被更新不会直接导致 `modif` 的更新，只有当节点本身被修改了才会更新 `modif`。
 > - 当节点的 `ctotal` 和 `csize` 的更新会导致 `modif` 的更新。
 
 ### 节点覆盖选项
@@ -140,7 +142,7 @@ TreeTable 可以除了可以使用基本的[增删改查](/units/docs-src-u589eu
 
 `setNodes()` 提供了简单的方式来创建或更新节点数据。它接受一个节点数据数组 `nodes`，可以根据数据更新或者创建节点。它的资源消耗是确定可控的，就是每个节点对应一次更新或创建操作。
 
-可以通过 `options.onlyUpdate` 选项来控制 `setNodes()` 只能更新已有节点而不创建新节点，避免更新已删除除节点时误创建新节点。
+可以通过 `options.updateOnly` 选项来控制 `setNodes()` 只能更新已有节点而不创建新节点，避免更新已删除除节点时误创建新节点。
 
 在 `setNodes()` 中可以使用覆盖选项来控制当目标位置有冲突节点时的处理方式，覆盖选项包括 `uniqueBy` 和 `overwriteMode`，具体见 [节点覆盖选项](#节点覆盖选项)。
 
@@ -181,3 +183,9 @@ let useTree = new TableTree<ITreeNode>(table, {
 ### 预覆盖节点 `preOverwriteNodes()`
 
 @import "../../src/extension/tree/core/preOverwriteNodes.ts" @doc=preOverwriteNodes
+
+### 预同步节点 `presyncNodes()`
+
+@import "../../src/extension/tree/core/presyncNodes.ts" @doc=presyncNodes
+
+## 工具接口

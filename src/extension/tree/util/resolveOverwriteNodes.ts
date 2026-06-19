@@ -1,0 +1,100 @@
+import type { TableTree } from "../TableTree"
+import type { ITreeNode, ITreeOverwriteOptions } from "../tree.types"
+import { getNodeValueByPath } from "./getNodeValueByPath"
+import { getUniqueFileNames } from "./getUniqueFileNames"
+
+export interface IResolveOverwriteNodesOptions extends ITreeOverwriteOptions {
+    /** move 模式下忽略当前正在移动的节点自身冲突。 */
+    ignoreNodeIds?: string[]
+}
+
+export interface IResolveOverwriteNodesResult<TNode extends ITreeNode = ITreeNode> {
+    /** 可以继续写入或移动的节点。 */
+    nodes: TNode[]
+    /** 被跳过的节点。 */
+    skippedNodes: TNode[]
+    /** 需要先删除的冲突节点 ID。 */
+    deleteNodeIds: string[]
+    /** 需要递归合并的目录节点对。 */
+    mergePairs: { sourceNode: TNode; targetNode: TNode }[]
+}
+
+/** 解析覆盖策略，返回后续写入、跳过、删除和合并计划。 */
+export async function resolveOverwriteNodes<TNode extends ITreeNode>(
+    table: TableTree<TNode>,
+    parentId: string,
+    nodes: TNode[],
+    options?: IResolveOverwriteNodesOptions,
+): Promise<IResolveOverwriteNodesResult<TNode>> {
+    const mode = options?.overwriteMode ?? "replace"
+    const uniqueBy = options?.uniqueBy ?? "id"
+    const ignoreNodeIds = new Set(options?.ignoreNodeIds ?? [])
+    const result: IResolveOverwriteNodesResult<TNode> = {
+        nodes: [],
+        skippedNodes: [],
+        deleteNodeIds: [],
+        mergePairs: [],
+    }
+
+    if (nodes.length === 0) return result
+
+    const conflictValues = nodes
+        .map((node) => getNodeValueByPath(node, uniqueBy))
+        .filter((value) => value !== undefined)
+    const conflictNodes = conflictValues.length
+        ? ((await table.findMany({ parentId, [uniqueBy]: { $in: conflictValues } })) as TNode[])
+        : []
+
+    if (mode === "newName" && uniqueBy === "name") {
+        const existsNames = conflictNodes
+            .filter((node) => !ignoreNodeIds.has(node.id))
+            .map((node) => node.name)
+            .filter((name): name is string => typeof name === "string")
+        const nextNames = await getUniqueFileNames(nodes.map((node) => node.name), existsNames)
+        result.nodes = nodes.map((node, index) => ({ ...node, name: nextNames[index] }))
+        return result
+    }
+
+    for (const node of nodes) {
+        const value = getNodeValueByPath(node, uniqueBy)
+        const conflicts = conflictNodes.filter((item) => {
+            return !ignoreNodeIds.has(item.id) && item.id !== node.id && getNodeValueByPath(item, uniqueBy) === value
+        })
+
+        if (conflicts.length === 0) {
+            result.nodes.push(node)
+            continue
+        }
+
+        if (mode === "skip") {
+            result.skippedNodes.push(node)
+            continue
+        }
+
+        if (mode === "merge" || mode === "mergeByModif") {
+            const firstConflict = conflicts[0]
+            if (node.isDir && firstConflict.isDir) {
+                result.mergePairs.push({ sourceNode: node, targetNode: firstConflict })
+                continue
+            }
+            if (mode === "mergeByModif" && firstConflict.modif > node.modif) {
+                result.skippedNodes.push(node)
+                continue
+            }
+        }
+
+        const deletableIds = conflicts
+            .filter((item) => options?.enableFileOverwriteDir || !(node.isDir === false && item.isDir === true))
+            .map((item) => item.id)
+        if (deletableIds.length !== conflicts.length) {
+            result.skippedNodes.push(node)
+            continue
+        }
+
+        result.deleteNodeIds.push(...deletableIds)
+        result.nodes.push(node)
+    }
+
+    result.deleteNodeIds = Array.from(new Set(result.deleteNodeIds))
+    return result
+}
