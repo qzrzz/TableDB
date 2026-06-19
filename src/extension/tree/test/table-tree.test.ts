@@ -51,7 +51,9 @@ describe("TableTree 目录树核心接口", () => {
         const newParent = await table.get("b")
         const file = await table.get("file")
         expect(file?.parentId).toBe("b")
-        expect(oldParent?.ctotal).toBe(0)
+        expect(oldParent?.ctotal).toBeUndefined()
+        expect(oldParent?.cftotal).toBeUndefined()
+        expect(oldParent?.csize).toBeUndefined()
         expect(newParent?.ctotal).toBe(1)
         expect(newParent?.csize).toBe(8)
     })
@@ -65,7 +67,7 @@ describe("TableTree 目录树核心接口", () => {
 
         await table.deleteNodes(["file"])
         expect(await table.get("file")).toBeUndefined()
-        expect((await table.get("dir"))?.ctotal).toBe(0)
+        expect((await table.get("dir"))?.ctotal).toBeUndefined()
 
         await table.unDeleteNodes(["file"])
         expect((await table.get("file"))?.parentId).toBe("dir")
@@ -140,6 +142,85 @@ describe("TableTree 目录树核心接口", () => {
         expect((await table.get("new"))?.name).toBe("文件 (1).txt")
     })
 
+    test("setNodes 开启 returnChangedNodesIds 时应返回被命中的目标节点 ID", async () => {
+        const table = createTreeTable("tree_set_changed_node_ids")
+        await table.inited
+
+        await table.createNodes([{ id: "old", name: "same.txt", isDir: false }], "/")
+        const result = await table.setNodes(
+            [{ id: "new", parentId: "/", name: "same.txt", isDir: false }],
+            { uniqueBy: "name", overwriteMode: "replace", returnChangedNodesIds: true },
+        )
+
+        expect(result.changedNodeIds).toEqual(["old"])
+        expect((await table.get("old"))?.name).toBe("same.txt")
+        expect(await table.get("new")).toBeUndefined()
+    })
+
+    test("setNodes 开启 returnChangedNodesIds 且 updateOnly 时不应返回未创建节点", async () => {
+        const table = createTreeTable("tree_set_changed_node_ids_update_only")
+        await table.inited
+
+        const result = await table.setNodes(
+            [{ id: "missing", parentId: "/", name: "missing.txt", isDir: false }],
+            { updateOnly: true, returnChangedNodesIds: true },
+        )
+
+        expect(result.changedNodeIds).toEqual([])
+        expect(await table.get("missing")).toBeUndefined()
+    })
+
+    test("setNodes 默认 setMode 应命中冲突节点并进行浅合并", async () => {
+        const table = createTreeTable("tree_set_mode_default")
+        await table.inited
+
+        await table.createNodes(
+            [{ id: "old", name: "same.txt", isDir: false, tag: "keep", meta: { old: true } }],
+            "/",
+        )
+        await table.setNodes(
+            [{ id: "new", parentId: "/", name: "same.txt", isDir: false, meta: { next: true } }],
+            { uniqueBy: "name", overwriteMode: "replace" },
+        )
+
+        const node = await table.get("old")
+        expect((node as any)?.tag).toBe("keep")
+        expect((node as any)?.meta).toEqual({ next: true })
+        expect(await table.get("new")).toBeUndefined()
+    })
+
+    test("setNodes 使用 setMode overwrite 时应整体替换已有节点字段", async () => {
+        const table = createTreeTable("tree_set_mode_overwrite")
+        await table.inited
+
+        await table.createNodes([{ id: "node", name: "node", isDir: false, tag: "old", meta: { keep: true } }], "/")
+        await table.setNodes([{ id: "node", parentId: "/", name: "node", isDir: false }], { setMode: "overwrite" })
+
+        const node = await table.get("node")
+        expect((node as any)?.tag).toBeUndefined()
+        expect((node as any)?.meta).toBeUndefined()
+        expect(node?.parentId).toBe("/")
+        expect(node?.name).toBe("node")
+    })
+
+    test("setNodes 使用 setMode merge 时应深度合并已有节点字段", async () => {
+        const table = createTreeTable("tree_set_mode_merge")
+        await table.inited
+
+        await table.createNodes(
+            [{ id: "node", name: "node", isDir: false, meta: { keep: true, nested: { a: 1 } } }],
+            "/",
+        )
+        await table.setNodes(
+            [{ id: "node", parentId: "/", name: "node", isDir: false, meta: { nested: { b: 2 } } }],
+            { setMode: "merge" },
+        )
+
+        expect((await table.get("node")) as any).toMatchObject({
+            meta: { keep: true, nested: { a: 1, b: 2 } },
+        })
+    })
+
     test("setNodes 使用 merge 时应递归合并目录子节点", async () => {
         const table = createTreeTable("tree_set_merge")
         await table.inited
@@ -184,6 +265,9 @@ describe("TableTree 目录树核心接口", () => {
 
         expect((await table.get("node"))?.modif).toBe(123)
         expect((await table.get("node"))?.cmodif).toBeUndefined()
+        expect((await table.get("node"))?.ctotal).toBeUndefined()
+        expect((await table.get("node"))?.cftotal).toBeUndefined()
+        expect((await table.get("node"))?.csize).toBeUndefined()
     })
 
     test("游标分页默认不应因空 index 漏掉同级节点", async () => {

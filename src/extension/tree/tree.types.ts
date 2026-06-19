@@ -28,11 +28,11 @@ export interface ITreeNode extends ITableDoc {
     childLastIndex?: string
     // 树结构数据 ---------------------
     /** 子级大小 （所有子级节点，不包括自身节点的大小） */
-    csize: number
+    csize?: number
     /** 子级数量 （所有子级节点的数量，包括文件夹和文件 ） */
-    ctotal: number
+    ctotal?: number
     /** 子级文件数量 （所有子级节点的数量，仅包含文件） */
-    cftotal: number
+    cftotal?: number
     /** 节点尺寸（byte） */
     size: number
 }

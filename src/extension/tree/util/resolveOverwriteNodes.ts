@@ -15,6 +15,8 @@ export interface IResolveOverwriteNodesResult<TNode extends ITreeNode = ITreeNod
     skippedNodes: TNode[]
     /** 需要先删除的冲突节点 ID。 */
     deleteNodeIds: string[]
+    /** replace 类覆盖中，来源节点和被覆盖目标节点的对应关系。 */
+    replacePairs: { sourceNode: TNode; targetNode: TNode }[]
     /** 需要递归合并的目录节点对。 */
     mergePairs: { sourceNode: TNode; targetNode: TNode }[]
 }
@@ -33,6 +35,7 @@ export async function resolveOverwriteNodes<TNode extends ITreeNode>(
         nodes: [],
         skippedNodes: [],
         deleteNodeIds: [],
+        replacePairs: [],
         mergePairs: [],
     }
 
@@ -46,7 +49,9 @@ export async function resolveOverwriteNodes<TNode extends ITreeNode>(
         : []
 
     if (mode === "newName" && uniqueBy === "name") {
-        const existsNames = conflictNodes
+        // newName 需要基于同级下所有已占用名称计算，避免只检查精确冲突时生成已有的后缀名。
+        const siblingNodes = await table.findMany({ parentId }) as TNode[]
+        const existsNames = siblingNodes
             .filter((node) => !ignoreNodeIds.has(node.id))
             .map((node) => node.name)
             .filter((name): name is string => typeof name === "string")
@@ -92,6 +97,7 @@ export async function resolveOverwriteNodes<TNode extends ITreeNode>(
         }
 
         result.deleteNodeIds.push(...deletableIds)
+        result.replacePairs.push(...conflicts.map((targetNode) => ({ sourceNode: node, targetNode })))
         result.nodes.push(node)
     }
 

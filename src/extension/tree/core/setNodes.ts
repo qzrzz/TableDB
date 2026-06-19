@@ -4,7 +4,7 @@ import { ITreePreSyncNodeResult } from "./presyncNodes"
 import { normalizeWritableNode } from "../util/normalizeWritableNode"
 import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
-import { resolveOverwriteNodes } from "../util/resolveOverwriteNodes"
+import { resolveOverwriteNodes, type IResolveOverwriteNodesResult } from "../util/resolveOverwriteNodes"
 import { rebalanceTreeIndexes } from "../util/rebalanceTreeIndexes"
 import { assertTreeParentExists } from "../util/assertTreeParent"
 
@@ -21,6 +21,29 @@ export type ITreeSetNodesOptions = ITreeOverwriteOptions & {
      * 返回
      */
     presync?: boolean
+
+    /**
+     * 是否返回被更新的节点 id
+     */
+    returnChangedNodesIds?: boolean
+
+    /**
+     * 赋值模式，同 setMany() 的赋值模式。
+     * 默认 "default" 相当于 `Object.assign(oldDoc, newDoc)`。
+     */
+    setMode?: "default" | "overwrite" | "merge"
+}
+
+export interface ITreeSetNodesResult extends ITreeChangeResult, Partial<ITreePreSyncNodeResult> {
+    /** 被更新的节点 id 列表 */
+    changedNodeIds?: string[]
+}
+
+interface IApplySetOverwriteResult {
+    /** 经过覆盖策略处理后需要写入的节点。 */
+    nodes: ITreeNode[]
+    /** 覆盖策略中已经被删除的冲突节点 ID。 */
+    deletedNodeIds: string[]
 }
 
 /** 设置节点
@@ -43,8 +66,10 @@ export async function setNodes(
     /** 要设置的节点数据列表 */
     nodes: Partial<ITreeNode>[],
     options?: ITreeSetNodesOptions,
-): Promise<ITreeChangeResult & Partial<ITreePreSyncNodeResult>> {
-    if (nodes.length === 0) return {}
+): Promise<ITreeSetNodesResult> {
+    if (nodes.length === 0) {
+        return options?.returnChangedNodesIds ? { changedNodeIds: [] } : {}
+    }
 
     const modif = Date.now()
     const presyncResult = options?.presync
@@ -61,7 +86,8 @@ export async function setNodes(
     })
     const oldParentIds = await collectExistingParentIds.call(this, writableNodes)
 
-    writableNodes = await applySetOverwrite.call(this, writableNodes, options)
+    const overwriteResult = await applySetOverwrite.call(this, writableNodes, options)
+    writableNodes = overwriteResult.nodes
 
     const nodesByParentId = new Map<string, ITreeNode[]>()
     for (const node of writableNodes) {
@@ -73,9 +99,17 @@ export async function setNodes(
 
     await applySetNodeIndexes.call(this, nodesByParentId, options)
 
-    await this.setMany(writableNodes, { updateOnly: options?.updateOnly })
+    const writableChangedNodeIds = options?.returnChangedNodesIds
+        ? await collectWritableChangedNodeIds.call(this, writableNodes, options)
+        : []
+
+    await this.setMany(writableNodes, resolveSetManyOptions(options))
     for (const [parentId, parentNodes] of nodesByParentId) {
-        await rebalanceTreeIndexes(this, parentId, parentNodes.map((node) => ({ id: node.id, index: node.index })))
+        await rebalanceTreeIndexes(
+            this,
+            parentId,
+            parentNodes.map((node) => ({ id: node.id, index: node.index })),
+        )
     }
     await refreshTreeMetadata(this, {
         parentIds: [...Array.from(nodesByParentId.keys()), ...oldParentIds],
@@ -83,11 +117,15 @@ export async function setNodes(
         cmodif: modif,
     })
 
-    return {
+    const result: ITreeSetNodesResult = {
         modif,
         cmodif: modif,
         ...presyncResult,
     }
+    if (options?.returnChangedNodesIds) {
+        result.changedNodeIds = Array.from(new Set([...writableChangedNodeIds, ...overwriteResult.deletedNodeIds]))
+    }
+    return result
 }
 
 async function assertSetNodeParents(
@@ -143,8 +181,9 @@ async function applySetOverwrite(
     this: TableTree<ITreeNode>,
     nodes: ITreeNode[],
     options?: ITreeSetNodesOptions,
-): Promise<ITreeNode[]> {
+): Promise<IApplySetOverwriteResult> {
     const nextNodes: ITreeNode[] = []
+    const deletedNodeIds: string[] = []
     let pendingNodes = [...nodes]
     const processedMergeSourceIds = new Set<string>()
 
@@ -157,8 +196,10 @@ async function applySetOverwrite(
                 continue
             }
             const resolved = await resolveOverwriteNodes(this, parentId, parentNodes, options)
-            if (resolved.deleteNodeIds.length > 0) {
-                await this.deleteNodes(resolved.deleteNodeIds)
+            const targetSetResult = resolveTargetSetNodes(resolved, options)
+            if (targetSetResult.deleteNodeIds.length > 0) {
+                await this.deleteNodes(targetSetResult.deleteNodeIds)
+                deletedNodeIds.push(...targetSetResult.deleteNodeIds)
             }
 
             for (const pair of resolved.mergePairs) {
@@ -182,11 +223,94 @@ async function applySetOverwrite(
                 }
             }
 
-            nextNodes.push(...resolved.nodes)
+            nextNodes.push(...targetSetResult.nodes)
         }
     }
 
-    return nextNodes
+    return {
+        nodes: nextNodes,
+        deletedNodeIds: Array.from(new Set(deletedNodeIds)),
+    }
+}
+
+async function collectWritableChangedNodeIds(
+    this: TableTree<ITreeNode>,
+    writableNodes: ITreeNode[],
+    options?: ITreeSetNodesOptions,
+): Promise<string[]> {
+    if (!options?.updateOnly) {
+        return writableNodes.map((node) => node.id)
+    }
+
+    const changedNodeIds: string[] = []
+    for (const node of writableNodes) {
+        const exists = await this.has(node.id)
+        if (exists) {
+            changedNodeIds.push(node.id)
+        }
+    }
+    return changedNodeIds
+}
+
+function resolveSetManyOptions(options?: ITreeSetNodesOptions) {
+    return {
+        updateOnly: options?.updateOnly,
+        overwrite: options?.setMode === "overwrite" ? true : undefined,
+        merge: options?.setMode === "merge" ? true : undefined,
+    }
+}
+
+function resolveTargetSetNodes(
+    resolved: IResolveOverwriteNodesResult<ITreeNode>,
+    options?: ITreeSetNodesOptions,
+): { nodes: ITreeNode[]; deleteNodeIds: string[] } {
+    if (resolved.replacePairs.length === 0) {
+        return {
+            nodes: resolved.nodes,
+            deleteNodeIds: resolved.deleteNodeIds,
+        }
+    }
+
+    const nextNodes: ITreeNode[] = []
+    const deleteNodeIds = new Set(resolved.deleteNodeIds)
+    const consumedSourceIds = new Set<string>()
+    const pairsBySourceId = new Map<string, typeof resolved.replacePairs>()
+    for (const pair of resolved.replacePairs) {
+        const pairs = pairsBySourceId.get(pair.sourceNode.id) ?? []
+        pairs.push(pair)
+        pairsBySourceId.set(pair.sourceNode.id, pairs)
+    }
+
+    for (const pairs of pairsBySourceId.values()) {
+        const [firstPair, ...extraPairs] = pairs
+        consumedSourceIds.add(firstPair.sourceNode.id)
+        deleteNodeIds.delete(firstPair.targetNode.id)
+        for (const pair of extraPairs) {
+            deleteNodeIds.add(pair.targetNode.id)
+        }
+        nextNodes.push(resolveConflictTargetUpdate(firstPair.sourceNode, firstPair.targetNode))
+    }
+
+    for (const node of resolved.nodes) {
+        if (!consumedSourceIds.has(node.id)) {
+            nextNodes.push(node)
+        }
+    }
+
+    return {
+        nodes: nextNodes,
+        deleteNodeIds: Array.from(deleteNodeIds),
+    }
+}
+
+function resolveConflictTargetUpdate(sourceNode: ITreeNode, targetNode: ITreeNode): ITreeNode {
+    return {
+        ...sourceNode,
+        id: targetNode.id,
+        parentId: targetNode.parentId,
+        index: targetNode.index,
+        name: targetNode.name,
+    }
 }
 
 function groupNodesByParentId(nodes: ITreeNode[]): Map<string, ITreeNode[]> {
@@ -217,10 +341,7 @@ function resolveMergeTargetUpdate(
     }
 }
 
-async function collectExistingParentIds(
-    this: TableTree<ITreeNode>,
-    nodes: ITreeNode[],
-): Promise<string[]> {
+async function collectExistingParentIds(this: TableTree<ITreeNode>, nodes: ITreeNode[]): Promise<string[]> {
     const parentIds = new Set<string>()
     for (const node of nodes) {
         const oldNode = await this.get(node.id, { ignoreMarkDelete: true })

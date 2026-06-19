@@ -66,12 +66,12 @@ async function refreshOneNode<TNode extends ITreeNode>(
     if (!node || node._isDeleted === true) return
 
     const stats = await calcChildrenStats(table, nodeId)
-    const $set: Record<string, any> = {
-        ctotal: stats.ctotal,
-        cftotal: stats.cftotal,
-        csize: stats.csize,
-    }
+    const $set: Record<string, any> = {}
     const $unset: Record<string, true> = {}
+
+    setNumberStat($set, $unset, "ctotal", stats.ctotal)
+    setNumberStat($set, $unset, "cftotal", stats.cftotal)
+    setNumberStat($set, $unset, "csize", stats.csize)
 
     if (stats.childLastIndex) {
         $set.childLastIndex = stats.childLastIndex
@@ -91,6 +91,19 @@ async function refreshOneNode<TNode extends ITreeNode>(
     }
 
     await table.updateOne({ id: nodeId }, { $set: $set as any, $unset })
+}
+
+function setNumberStat(
+    $set: Record<string, any>,
+    $unset: Record<string, true>,
+    key: "ctotal" | "cftotal" | "csize",
+    value: number,
+) {
+    if (value > 0) {
+        $set[key] = value
+    } else {
+        $unset[key] = true
+    }
 }
 
 function isExistingStatChanged(oldValue: number | undefined, newValue: number): boolean {
