@@ -169,6 +169,32 @@ describe("TableTree preOverwriteNodes", () => {
         expect(result.existNodes.map((node) => node.id)).toEqual(["target-same"])
     })
 
+    test("预检移动父子混合选择时不应把后代节点当作目标父级直属冲突", async () => {
+        const table = await createDefinedTreeTable("nested-move-roots")
+
+        await table.createNodes(
+            [
+                { id: "source", name: "来源", isDir: true },
+                { id: "target", name: "目标", isDir: true },
+            ],
+            "/",
+        )
+        await table.createNodes([{ id: "source-dir", name: "目录", isDir: true }], "source")
+        await table.createNodes([{ id: "source-child", name: "same.txt", isDir: false, size: 1 }], "source-dir")
+        await table.createNodes([{ id: "target-same", name: "same.txt", isDir: false, size: 2 }], "target")
+
+        const result = await table.preOverwriteNodes([], ["source-dir", "source-child"], "target", {
+            uniqueBy: "name",
+        })
+
+        expect(result).toEqual({ isConflict: false, existNodes: [] })
+
+        await table.moveNodes(["source-dir", "source-child"], "target", { uniqueBy: "name", overwriteMode: "skip" })
+        expect((await table.get("source-dir"))?.parentId).toBe("target")
+        expect((await table.get("source-child"))?.parentId).toBe("source-dir")
+        expect((await table.get("target-same"))?.parentId).toBe("target")
+    })
+
     test("nodes 和 nodeIds 的检测值应合并去重", async () => {
         const table = await createOverwriteFixture()
 

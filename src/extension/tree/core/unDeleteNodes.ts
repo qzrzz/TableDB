@@ -33,10 +33,16 @@ export async function unDeleteNodes(
     const uniqueNodeIds = Array.from(new Set(nodeIds))
     if (uniqueNodeIds.length === 0) return
 
-    const nodes = await collectDescendantNodes(this, uniqueNodeIds, {
+    const descendantNodes = await collectDescendantNodes(this, uniqueNodeIds, {
         includeSelf: true,
         ignoreMarkDelete: true,
     })
+    const ancestorNodes = await collectAncestorNodes.call(this, uniqueNodeIds)
+    const nodesById = new Map<string, ITreeNode>()
+    for (const node of [...ancestorNodes, ...descendantNodes]) {
+        nodesById.set(node.id, node)
+    }
+    const nodes = Array.from(nodesById.values())
     if (nodes.length === 0) return
 
     const modif = Date.now()
@@ -54,4 +60,23 @@ export async function unDeleteNodes(
         nodeIds: nodes.map((node) => node.id),
         cmodif: modif,
     })
+}
+
+/** 恢复深层节点时需要一并恢复祖先链，避免出现父级已删除但子节点可见的断层。 */
+async function collectAncestorNodes(this: TableTree<ITreeNode>, nodeIds: string[]): Promise<ITreeNode[]> {
+    const result: ITreeNode[] = []
+    const visitedIds = new Set<string>()
+
+    for (const nodeId of nodeIds) {
+        let node = await this.get(nodeId, { ignoreMarkDelete: true })
+        while (node && node.parentId !== "/" && !visitedIds.has(node.parentId)) {
+            const parentNode = await this.get(node.parentId, { ignoreMarkDelete: true })
+            if (!parentNode) break
+            visitedIds.add(parentNode.id)
+            result.push(parentNode)
+            node = parentNode
+        }
+    }
+
+    return result
 }

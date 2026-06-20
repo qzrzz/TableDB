@@ -111,6 +111,35 @@ describe("TableTree setNodes", () => {
         )
     })
 
+    test("更新已有目录父级时应拒绝移动到自己或后代下面", async () => {
+        const table = await createDefinedTreeTable("guard-cycle-parent")
+
+        await table.createNodes([{ id: "dir", name: "目录", isDir: true }], "/")
+        await table.createNodes([{ id: "child", name: "子目录", isDir: true }], "dir")
+
+        await expect(
+            table.setNodes([{ id: "dir", parentId: "dir", name: "目录", isDir: true }]),
+        ).rejects.toThrow()
+        await expect(
+            table.setNodes([{ id: "dir", parentId: "child", name: "目录", isDir: true }]),
+        ).rejects.toThrow()
+        expect((await table.get("dir"))?.parentId).toBe("/")
+        expect((await table.get("child"))?.parentId).toBe("dir")
+    })
+
+    test("同一批次新建节点时应拒绝形成循环父级关系", async () => {
+        const table = await createDefinedTreeTable("guard-batch-cycle-parent")
+
+        await expect(
+            table.setNodes([
+                { id: "a", parentId: "b", name: "a", isDir: true },
+                { id: "b", parentId: "a", name: "b", isDir: true },
+            ]),
+        ).rejects.toThrow()
+        expect(await table.get("a", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("b", { ignoreMarkDelete: true })).toBeUndefined()
+    })
+
     test("默认 setMode 应浅合并已有节点字段", async () => {
         const table = await createDefinedTreeTable("set-mode-default")
 
@@ -172,6 +201,48 @@ describe("TableTree setNodes", () => {
         expect(await table.get("missing")).toBeUndefined()
     })
 
+    test("updateOnly 完全没有实际写入时不应返回变更时间", async () => {
+        const table = await createDefinedTreeTable("update-only-no-change")
+
+        const result = await table.setNodes(
+            [{ id: "missing", parentId: "/", name: "missing.txt", isDir: false }],
+            { updateOnly: true, returnChangedNodesIds: true },
+        )
+
+        expect(result).toEqual({ changedNodeIds: [] })
+        expect(await table.get("missing")).toBeUndefined()
+    })
+
+    test("updateOnly 不应把已标记删除的同 ID 节点恢复为可见节点", async () => {
+        const table = await createDefinedTreeTable("update-only-skip-mark-deleted")
+
+        await table.createNodes([{ id: "deleted", name: "old.txt", isDir: false, size: 1, tag: "old" }], "/")
+        await table.deleteNodes(["deleted"])
+
+        const result = await table.setNodes(
+            [{ id: "deleted", parentId: "/", name: "new.txt", isDir: false, size: 5, tag: "new" }],
+            { updateOnly: true, returnChangedNodesIds: true },
+        )
+
+        expect(result.changedNodeIds).toEqual([])
+        expect(await table.get("deleted")).toBeUndefined()
+        expect((await table.get("deleted", { ignoreMarkDelete: true }))?.tag).toBe("old")
+    })
+
+    test("写入已标记删除的同 ID 节点时应恢复为可见节点并更新父级统计", async () => {
+        const table = await createDefinedTreeTable("restore-mark-deleted-same-id")
+
+        await table.createNodes([{ id: "node", name: "old.txt", isDir: false, size: 1, tag: "old" }], "/")
+        await table.deleteNodes(["node"])
+
+        await table.setNodes([{ id: "node", parentId: "/", name: "new.txt", isDir: false, size: 5, tag: "new" }])
+
+        const node = await table.get("node")
+        expect(node?.name).toBe("new.txt")
+        expect(node?.tag).toBe("new")
+        expect((node as any)?._isDeleted).toBeUndefined()
+    })
+
     test("replace 覆盖策略应命中冲突节点并保留目标节点 ID", async () => {
         const table = await createDefinedTreeTable("replace")
 
@@ -204,6 +275,32 @@ describe("TableTree setNodes", () => {
         expect(await table.get("first")).toBeUndefined()
     })
 
+    test("replace 覆盖策略处理批次内部同名目录冲突时应跳过被替换目录的整棵子树", async () => {
+        const table = await createDefinedTreeTable("replace-batch-dir-conflict-children")
+
+        await table.createNodes([{ id: "root", name: "根", isDir: true }], "/")
+        await table.setNodes(
+            [
+                { id: "dir-a", parentId: "root", name: "same", isDir: true, tag: "first" },
+                { id: "a-file", parentId: "dir-a", name: "first.txt", isDir: false, size: 1 },
+                { id: "dir-b", parentId: "root", name: "same", isDir: true, tag: "second" },
+                { id: "b-file", parentId: "dir-b", name: "second.txt", isDir: false, size: 2 },
+                { id: "b-sub", parentId: "dir-b", name: "sub", isDir: true },
+                { id: "b-deep", parentId: "b-sub", name: "deep.txt", isDir: false, size: 3 },
+            ],
+            { uniqueBy: "name", overwriteMode: "replace", index: { toEnd: true } },
+        )
+
+        expect(await table.get("dir-a")).toBeUndefined()
+        expect(await table.get("a-file")).toBeUndefined()
+        expect((await table.get("dir-b"))?.parentId).toBe("root")
+        expect((await table.get("b-file"))?.parentId).toBe("dir-b")
+        expect((await table.get("b-deep"))?.parentId).toBe("b-sub")
+        expect(await listChildIds(table, "root")).toEqual(["dir-b"])
+        expect((await table.get("dir-b"))?.ctotal).toBe(3)
+        expect((await table.get("dir-b"))?.csize).toBe(5)
+    })
+
     test("replace 覆盖策略同时遇到已有目标和批次内部冲突时应复用已有目标 ID", async () => {
         const table = await createDefinedTreeTable("replace-existing-and-batch-conflict")
 
@@ -221,6 +318,79 @@ describe("TableTree setNodes", () => {
         expect((await table.get("old"))?.tag).toBe("incoming-b")
         expect(await table.get("incoming-a")).toBeUndefined()
         expect(await table.get("incoming-b")).toBeUndefined()
+    })
+
+    test("replace 覆盖同名目录并复用目标 ID 时应递归删除目标目录原有子树", async () => {
+        const table = await createDefinedTreeTable("replace-dir-clean-children")
+
+        await table.createNodes([{ id: "dir", name: "same", isDir: true, tag: "old" }], "/")
+        await table.createNodes([{ id: "old-child", name: "old-child.txt", isDir: false, size: 3 }], "dir")
+        await table.createNodes([{ id: "old-deep-dir", name: "old-deep", isDir: true }], "dir")
+        await table.createNodes([{ id: "old-deep-file", name: "old-deep.txt", isDir: false, size: 5 }], "old-deep-dir")
+
+        const result = await table.setNodes(
+            [{ id: "incoming", parentId: "/", name: "same", isDir: true, tag: "new" }],
+            { uniqueBy: "name", overwriteMode: "replace", returnChangedNodesIds: true },
+        )
+
+        expect(result.changedNodeIds).toEqual(expect.arrayContaining(["dir", "old-child", "old-deep-dir", "old-deep-file"]))
+        expect((await table.get("dir"))?.tag).toBe("new")
+        expect(await table.get("incoming")).toBeUndefined()
+        expect(await table.get("old-child")).toBeUndefined()
+        expect(await table.get("old-deep-dir")).toBeUndefined()
+        expect(await table.get("old-deep-file")).toBeUndefined()
+        expect((await table.get("dir"))?.ctotal ?? 0).toBe(0)
+    })
+
+    test("replace 覆盖同名目录并复用目标 ID 时应将本批次来源子节点改挂到目标目录下", async () => {
+        const table = await createDefinedTreeTable("replace-dir-reparent-incoming-children")
+
+        await table.createNodes([{ id: "target", name: "same", isDir: true, tag: "old" }], "/")
+        await table.createNodes([{ id: "old-child", name: "old.txt", isDir: false, size: 2 }], "target")
+
+        await table.setNodes(
+            [
+                { id: "incoming", parentId: "/", name: "same", isDir: true, tag: "new" },
+                { id: "incoming-child", parentId: "incoming", name: "new.txt", isDir: false, size: 5 },
+                { id: "incoming-dir", parentId: "incoming", name: "sub", isDir: true },
+                { id: "incoming-deep", parentId: "incoming-dir", name: "deep.txt", isDir: false, size: 7 },
+            ],
+            { uniqueBy: "name", overwriteMode: "replace" },
+        )
+
+        expect(await table.get("incoming")).toBeUndefined()
+        expect((await table.get("target"))?.tag).toBe("new")
+        expect((await table.get("incoming-child"))?.parentId).toBe("target")
+        expect((await table.get("incoming-dir"))?.parentId).toBe("target")
+        expect((await table.get("incoming-deep"))?.parentId).toBe("incoming-dir")
+        expect(await table.get("old-child")).toBeUndefined()
+        expect((await table.get("target"))?.ctotal).toBe(3)
+        expect((await table.get("target"))?.csize).toBe(12)
+    })
+
+    test("replace 清理目标旧子树时不应删除本批次会重写的同 ID 子节点", async () => {
+        const table = await createDefinedTreeTable("replace-dir-keep-overwritten-child")
+
+        await table.createNodes([{ id: "target", name: "same", isDir: true, tag: "old" }], "/")
+        await table.createNodes([{ id: "child", name: "old-child.txt", isDir: false, size: 2, tag: "old-child" }], "target")
+        await table.createNodes([{ id: "stale", name: "stale.txt", isDir: false, size: 3 }], "target")
+
+        await table.setNodes(
+            [
+                { id: "incoming", parentId: "/", name: "same", isDir: true, tag: "new" },
+                { id: "child", parentId: "incoming", name: "new-child.txt", isDir: false, size: 5, tag: "new-child" },
+            ],
+            { uniqueBy: "name", overwriteMode: "replace" },
+        )
+
+        const child = await table.get("child")
+        expect(child?.parentId).toBe("target")
+        expect(child?.name).toBe("new-child.txt")
+        expect(child?.tag).toBe("new-child")
+        expect((child as any)?._isDeleted).toBeUndefined()
+        expect(await table.get("stale")).toBeUndefined()
+        expect((await table.get("target"))?.ctotal).toBe(1)
+        expect((await table.get("target"))?.csize).toBe(5)
     })
 
     test("skip 覆盖策略应跳过冲突节点", async () => {

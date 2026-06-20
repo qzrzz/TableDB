@@ -291,12 +291,15 @@ describe("defineTableTree 创建的 TableTree moveNodes", () => {
         )
         await table.createNodes([{ id: "file", name: "index.ts", isDir: false, size: 9 }], "src")
 
-        await table.moveNodes(["src"], "/", { uniqueBy: "name", overwriteMode: "merge" })
+        const result = await table.moveNodes(["src"], "/", { uniqueBy: "name", overwriteMode: "merge" })
 
+        expect(result.modif).toBeTypeOf("number")
+        expect(result.modif).toBe(result.cmodif)
         expect(await table.get("src")).toBeUndefined()
         expect((await table.get("file"))?.parentId).toBe("target")
         expect((await table.get("target"))?.ctotal).toBe(1)
         expect((await table.get("target"))?.csize).toBe(9)
+        expect((await table.get("target"))?.cmodif).toBe(result.cmodif)
     })
 
     test("mergeByModif 对文件冲突应保留较新的目标节点", async () => {

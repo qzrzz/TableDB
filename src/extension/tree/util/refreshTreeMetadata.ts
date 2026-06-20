@@ -99,7 +99,9 @@ async function refreshOneNode<TNode extends ITreeNode>(
 
     if (
         isExistingStatChanged(node.ctotal, stats.ctotal) ||
-        isExistingStatChanged(node.csize, stats.csize)
+        isExistingStatChanged(node.cftotal, stats.cftotal) ||
+        isExistingStatChanged(node.csize, stats.csize) ||
+        node.childLastIndex !== stats.childLastIndex
     ) {
         $set.modif = cmodif ?? Date.now()
     }

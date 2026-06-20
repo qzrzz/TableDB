@@ -37,6 +37,18 @@ describe("defineTableTree 创建的 TableTree updateNodes", () => {
         expect((await table.get("node"))?.tag).toBe("old")
     })
 
+    test("默认不应更新已标记删除的节点，也不应返回虚假的变更结果", async () => {
+        const table = await createDefinedTreeTable("skip-mark-deleted")
+
+        await table.createNodes([{ id: "node", name: "node", isDir: false, tag: "old" }], "/")
+        await table.deleteNodes(["node"])
+
+        const result = await table.updateNodes({ id: "node" }, { $set: { tag: "new" } })
+
+        expect(result).toEqual({})
+        expect((await table.get("node", { ignoreMarkDelete: true }))?.tag).toBe("old")
+    })
+
     test("普通更新应自动写入统一的 modif", async () => {
         const table = await createDefinedTreeTable("basic")
 
@@ -101,6 +113,22 @@ describe("defineTableTree 创建的 TableTree updateNodes", () => {
         expect((await table.get("deep-file"))?.tag).toBe("deep-updated")
     })
 
+    test("deep 更新默认不应更新已标记删除的后代节点", async () => {
+        const table = await createDefinedTreeTable("deep-skip-mark-deleted-descendant")
+
+        await table.createNodes([{ id: "root", name: "root", isDir: true }], "/")
+        await table.createNodes([{ id: "visible", name: "visible.txt", isDir: false, tag: "old" }], "root")
+        await table.createNodes([{ id: "deleted", name: "deleted.txt", isDir: false, tag: "old" }], "root")
+        await table.deleteNodes(["deleted"])
+
+        await table.updateNodes({ id: "root" }, { $set: { tag: "deep-updated" } }, { deep: true })
+
+        expect((await table.get("root"))?.tag).toBe("deep-updated")
+        expect((await table.get("visible"))?.tag).toBe("deep-updated")
+        expect(await table.get("deleted")).toBeUndefined()
+        expect((await table.get("deleted", { ignoreMarkDelete: true }))?.tag).toBe("old")
+    })
+
     test("非 deep 更新不应影响后代节点", async () => {
         const table = await createDefinedTreeTable("not-deep")
 
@@ -146,6 +174,34 @@ describe("defineTableTree 创建的 TableTree updateNodes", () => {
         expect((await table.get("a"))?.ctotal ?? 0).toBe(0)
         expect((await table.get("b"))?.ctotal).toBe(1)
         expect((await table.get("b"))?.csize).toBe(8)
+    })
+
+    test("批量更新 parentId 移动多个同级节点时应避免目标父级出现重复排序索引", async () => {
+        const table = await createDefinedTreeTable("parent-index-batch")
+
+        await table.createNodes(
+            [
+                { id: "src", name: "src", isDir: true },
+                { id: "target", name: "target", isDir: true },
+            ],
+            "/",
+        )
+        await table.createNodes(
+            [
+                { id: "a", name: "a", isDir: false, tag: "move" },
+                { id: "b", name: "b", isDir: false, tag: "move" },
+            ],
+            "src",
+        )
+        await table.createNodes([{ id: "old", name: "old", isDir: false }], "target", { index: { toEnd: true } })
+
+        await table.updateNodes({ tag: "move" }, { $set: { parentId: "target" } })
+
+        const moved = await table.findMany({ parentId: "target" })
+        const indexes = moved.map((node) => node.index)
+        expect(new Set(indexes).size).toBe(indexes.length)
+        expect(indexes.every((index) => Boolean(index))).toBe(true)
+        expect((await table.get("target"))?.childLastIndex).toBeTruthy()
     })
 
     test("更新 index 后应刷新父级 childLastIndex 并影响列表顺序", async () => {
@@ -226,15 +282,107 @@ describe("defineTableTree 创建的 TableTree updateNodes", () => {
         await expect(table.updateNodes({ id: "dir" }, { $set: { parentId: "child" } })).rejects.toThrow("后代")
     })
 
-    test("deep 更新移动目录时应拒绝移动到自己的后代中", async () => {
+    test("应拒绝修改或移除节点身份和树结构必填字段", async () => {
+        const table = await createDefinedTreeTable("guard-required-fields")
+
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
+        await table.createNodes([{ id: "file", name: "file.txt", isDir: false, size: 5 }], "dir")
+
+        await expect(table.updateNodes({ id: "file" }, { $set: { id: "renamed-id" } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $unset: { id: true } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $unset: { parentId: true } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $unset: ["name"] as any })).rejects.toThrow("结构字段")
+
+        expect(await table.get("renamed-id")).toBeUndefined()
+        expect((await table.get("file"))?.parentId).toBe("dir")
+        expect((await table.get("file"))?.name).toBe("file.txt")
+        expect(await listChildIds(table, "dir")).toEqual(["file"])
+        expect((await table.get("dir"))?.ctotal).toBe(1)
+    })
+
+    test("应拒绝把树结构必填字段更新为空值", async () => {
+        const table = await createDefinedTreeTable("guard-empty-required-fields")
+
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
+        await table.createNodes([{ id: "file", name: "file.txt", isDir: false, size: 5 }], "dir")
+
+        await expect(table.updateNodes({ id: "file" }, { $set: { parentId: undefined } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $set: { name: undefined } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $set: { isDir: null } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $set: { size: undefined } as any })).rejects.toThrow("结构字段")
+
+        expect((await table.get("file"))?.parentId).toBe("dir")
+        expect((await table.get("file"))?.name).toBe("file.txt")
+        expect((await table.get("file"))?.isDir).toBe(false)
+        expect((await table.get("file"))?.size).toBe(5)
+        expect(await listChildIds(table, "dir")).toEqual(["file"])
+    })
+
+    test("应拒绝通过 rename 算子改写树结构字段", async () => {
+        const table = await createDefinedTreeTable("guard-rename-structure-fields")
+
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
+        await table.createNodes([{ id: "file", name: "file.txt", isDir: false, size: 5, tag: "draft" }], "dir")
+
+        await expect(table.updateNodes({ id: "file" }, { $rename: { parentId: "oldParentId" } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $rename: { tag: "parentId" } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $rename: { name: "title" } as any })).rejects.toThrow("结构字段")
+
+        expect((await table.get("file"))?.parentId).toBe("dir")
+        expect((await table.get("file"))?.name).toBe("file.txt")
+        expect((await table.get("file"))?.tag).toBe("draft")
+        expect(await listChildIds(table, "dir")).toEqual(["file"])
+    })
+
+    test("应拒绝通过比较算子改写树结构字段", async () => {
+        const table = await createDefinedTreeTable("guard-compare-structure-fields")
+
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
+        await table.createNodes([{ id: "file", name: "file.txt", isDir: false, size: 5 }], "dir")
+
+        await expect(table.updateNodes({ id: "file" }, { $max: { parentId: "missing-parent" } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $min: { name: "bad/name" } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $max: { id: "renamed-id" } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $min: { isDir: null } as any })).rejects.toThrow("结构字段")
+        await expect(table.updateNodes({ id: "file" }, { $min: { size: null } as any })).rejects.toThrow("结构字段")
+
+        expect(await table.get("renamed-id")).toBeUndefined()
+        expect((await table.get("file"))?.parentId).toBe("dir")
+        expect((await table.get("file"))?.name).toBe("file.txt")
+        expect((await table.get("file"))?.isDir).toBe(false)
+        expect((await table.get("file"))?.size).toBe(5)
+        expect(await listChildIds(table, "dir")).toEqual(["file"])
+    })
+
+    test("批量命中父子节点并更新 parentId 时应拒绝平铺后代节点", async () => {
+        const table = await createDefinedTreeTable("batch-parent-child-parent-guard")
+
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true, tag: "move" }], "/")
+        await table.createNodes([{ id: "child", name: "child", isDir: true, tag: "move" }], "dir")
+        await table.createNodes([{ id: "target", name: "target", isDir: true }], "/")
+
+        await expect(
+            table.updateNodes({ tag: "move" }, { $set: { parentId: "target" } }),
+        ).rejects.toThrow("后代")
+
+        expect((await table.get("dir"))?.parentId).toBe("/")
+        expect((await table.get("child"))?.parentId).toBe("dir")
+    })
+
+    test("deep 更新时如果修改 parentId 应抛出错误并保持原有层级", async () => {
         const table = await createDefinedTreeTable("deep-parent-guard")
 
         await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
         await table.createNodes([{ id: "child", name: "child", isDir: true }], "dir")
         await table.createNodes([{ id: "deep-child", name: "deep-child", isDir: true }], "child")
+        await table.createNodes([{ id: "target", name: "target", isDir: true }], "/")
 
         await expect(
-            table.updateNodes({ id: "dir" }, { $set: { parentId: "deep-child" } }, { deep: true }),
-        ).rejects.toThrow("自己")
+            table.updateNodes({ id: "dir" }, { $set: { parentId: "target" } }, { deep: true }),
+        ).rejects.toThrow("deep 更新不能同时修改 parentId")
+
+        expect((await table.get("dir"))?.parentId).toBe("/")
+        expect((await table.get("child"))?.parentId).toBe("dir")
+        expect((await table.get("deep-child"))?.parentId).toBe("child")
     })
 })

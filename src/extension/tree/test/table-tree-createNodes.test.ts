@@ -275,4 +275,23 @@ describe("TableTree createNodes", () => {
         expect((await table.get("exists"))?.name).toBe("旧节点")
         expect((await table.get("new"))?.name).toBe("新文件")
     })
+
+    test("同一批次内部重复 ID 时 returnNewNodes 应只返回实际插入的节点数据", async () => {
+        const table = await createDefinedTreeTable("duplicate-id-in-batch")
+
+        const result = await table.createNodes(
+            [
+                { id: "dup", name: "第一个", isDir: false, size: 1 },
+                { id: "dup", name: "第二个", isDir: false, size: 2 },
+            ],
+            "/",
+            { returnNewNodes: true },
+        )
+
+        expect(result.createdNodeIds).toEqual(["dup"])
+        expect(result.newNodes).toHaveLength(1)
+        expect(result.newNodes?.[0].name).toBe("第一个")
+        expect((await table.get("dup"))?.name).toBe("第一个")
+        expect((await table.get("dup"))?.size).toBe(1)
+    })
 })

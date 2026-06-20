@@ -12,6 +12,15 @@ export interface ITreeMoveNodesOptions extends ITreeOverwriteOptions {
     index?: ITreeIndexOptions
 }
 
+interface IApplyMoveOverwriteResult {
+    /** 覆盖策略处理后仍需要移动到目标父级的节点。 */
+    nodes: ITreeNode[]
+    /** merge / replace 删除等覆盖处理是否已经产生真实变更。 */
+    hasChanged: boolean
+    /** 覆盖处理内部已经产生的变更时间。 */
+    modif?: number
+}
+
 /** 移动节点
  *
  *  把目标节点移动到新的父节点下，遵循覆盖设置
@@ -36,8 +45,16 @@ export async function moveNodes(
 
     await assertNotMoveIntoSelfOrDescendant(this, nodes.map((node) => node.id), parentId)
 
-    const movableNodes = await applyMoveOverwrite.call(this, nodes, parentId, options)
-    if (movableNodes.length === 0) return {}
+    const overwriteResult = await applyMoveOverwrite.call(this, nodes, parentId, options)
+    const movableNodes = overwriteResult.nodes
+    if (movableNodes.length === 0) {
+        if (!overwriteResult.hasChanged) return {}
+        const modif = overwriteResult.modif ?? Date.now()
+        return {
+            modif,
+            cmodif: modif,
+        }
+    }
 
     const indexes = await resolveTreeIndexes(this, parentId, movableNodes.length, options?.index)
     const modif = Date.now()
@@ -73,19 +90,28 @@ async function applyMoveOverwrite(
     nodes: ITreeNode[],
     parentId: string,
     options?: ITreeMoveNodesOptions,
-): Promise<ITreeNode[]> {
+): Promise<IApplyMoveOverwriteResult> {
     const resolved = await resolveOverwriteNodes(this, parentId, nodes, {
         ...options,
         ignoreNodeIds: nodes.map((node) => node.id),
     })
+    let hasChanged = false
+    let changedModif: number | undefined
     if (resolved.deleteNodeIds.length > 0) {
         await this.deleteNodes(resolved.deleteNodeIds)
+        hasChanged = true
+        changedModif = Date.now()
     }
     for (const pair of resolved.mergePairs) {
-        await mergeMoveDir.call(this, pair.sourceNode, pair.targetNode, options)
+        changedModif = await mergeMoveDir.call(this, pair.sourceNode, pair.targetNode, options) ?? changedModif
+        hasChanged = true
     }
 
-    return resolved.nodes
+    return {
+        nodes: resolved.nodes,
+        hasChanged,
+        modif: changedModif,
+    }
 }
 
 async function mergeMoveDir(
@@ -93,12 +119,16 @@ async function mergeMoveDir(
     sourceNode: ITreeNode,
     targetNode: ITreeNode,
     options?: ITreeMoveNodesOptions,
-): Promise<void> {
+): Promise<number | undefined> {
+    let changedModif: number | undefined
     const children = await this.findMany({ parentId: sourceNode.id }, { sort: { index: 1 } })
     if (children.length > 0) {
-        await this.moveNodes(children.map((child) => child.id), targetNode.id, options)
+        const result = await this.moveNodes(children.map((child) => child.id), targetNode.id, options)
+        changedModif = result.cmodif ?? result.modif
     }
     await this.deleteNodes([sourceNode.id])
+    const target = await this.get(targetNode.id)
+    return target?.cmodif ?? changedModif
 }
 
 async function filterNestedMoveRoots(

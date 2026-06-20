@@ -57,8 +57,9 @@ export async function copyNodes(
 
     const createdNodeIds: string[] = []
     const copyNodes: ITreeNode[] = []
+    const modif = Date.now()
     for (let i = 0; i < rootNodes.length; i++) {
-        const createdId = await buildCopyNodes.call(this, rootNodes[i], parentId, rootNames[i], copyNodes, options)
+        const createdId = await buildCopyNodes.call(this, rootNodes[i], parentId, rootNames[i], copyNodes, modif, options)
         createdNodeIds.push(createdId)
     }
 
@@ -85,6 +86,7 @@ async function buildCopyNodes(
     parentId: string,
     name: string,
     copyNodes: ITreeNode[],
+    modif: number,
     options?: ITreeCopyNodesOptions,
 ): Promise<string> {
     const copiedId = newNodeId()
@@ -94,6 +96,7 @@ async function buildCopyNodes(
             id: copiedId,
             parentId,
             name,
+            modif,
         },
         { parentId },
     )
@@ -103,7 +106,7 @@ async function buildCopyNodes(
     if (options?.deep) {
         const children = await this.findMany({ parentId: sourceNode.id }, { sort: { index: 1 } })
         for (const child of children) {
-            await buildCopyNodes.call(this, child, copiedId, child.name, copyNodes, options)
+            await buildCopyNodes.call(this, child, copiedId, child.name, copyNodes, modif, options)
         }
     }
 

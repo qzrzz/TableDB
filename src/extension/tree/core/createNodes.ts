@@ -66,7 +66,9 @@ export async function createNodes(
     }
 
     const result = await this.insertMany(newNodes)
-    await rebalanceTreeIndexes(this, parentId, newNodes.map((node) => ({ id: node.id, index: node.index })))
+    const insertedNodeSet = new Set(result.insertedIds)
+    const insertedNodes = collectInsertedNodes(newNodes, insertedNodeSet)
+    await rebalanceTreeIndexes(this, parentId, insertedNodes.map((node) => ({ id: node.id, index: node.index })))
     await refreshTreeMetadata(this, {
         parentIds: [parentId],
         nodeIds: result.insertedIds,
@@ -75,6 +77,20 @@ export async function createNodes(
 
     return {
         createdNodeIds: result.insertedIds,
-        newNodes: options?.returnNewNodes ? newNodes.filter((node) => result.insertedIds.includes(node.id)) : undefined,
+        newNodes: options?.returnNewNodes ? insertedNodes : undefined,
     }
+}
+
+/** insertMany 会跳过重复 ID，这里只保留每个实际插入 ID 对应的第一份节点数据。 */
+function collectInsertedNodes(nodes: ITreeNode[], insertedNodeSet: Set<string>): ITreeNode[] {
+    const seenIds = new Set<string>()
+    const insertedNodes: ITreeNode[] = []
+    for (const node of nodes) {
+        if (!insertedNodeSet.has(node.id) || seenIds.has(node.id)) {
+            continue
+        }
+        seenIds.add(node.id)
+        insertedNodes.push(node)
+    }
+    return insertedNodes
 }

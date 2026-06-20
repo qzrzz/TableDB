@@ -51,7 +51,7 @@ export async function deleteNodes(
 
     const shouldRealDelete = options?.realDelete === true || this.options?.enableMarkDelete !== true
     if (shouldRealDelete) {
-        await this.deleteMany({ id: { $in: deleteIds } }, { readDelete: true })
+        await this.deleteMany({ id: { $in: deleteIds } }, { realDelete: true, readDelete: true } as any)
     } else {
         await this.updateMany(
             { id: { $in: deleteIds } },

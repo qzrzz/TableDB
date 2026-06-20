@@ -247,7 +247,7 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         expect(activeNodes.length).toBe(1)
     })
 
-    test("moveNodes 批量移动节点时，如果同时移动了父目录和其子节点，子节点应该保留在父目录下，而不应被平铺移动到目标目录", async () => {
+    test("moveNodes 批量移动节点时，如果同时移动了父目录 and 其子节点，子节点应该保留在父目录下，而不应被平铺移动到目标目录", async () => {
         const table = createTreeTable("tree_bug_move_nodes_nested_flatten")
         await table.inited
 
@@ -258,7 +258,7 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         // 2. 创建目标目录 target
         await table.createNodes([{ id: "target", name: "target", isDir: true }], "/")
 
-        // 3. 批量将 dir1 及其子文件 child_file 移动到 target
+        // 3. 批量将 dir1 及其子文件 child_file 移动 to target
         await table.moveNodes(["dir1", "child_file"], "target")
 
         const dir1 = await table.get("dir1")
@@ -268,5 +268,82 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         expect(dir1?.parentId).toBe("target")
         // 验证子文件应仍然在 dir1 下，而不是被平铺直接移动到 target 下
         expect(child?.parentId).toBe("dir1")
+    })
+
+    test("copyNodes 复制目录及其子树时，所有复制出来的节点（包括子孙节点）的 modif 属性都应当更新为当前复制操作的时间戳", async () => {
+        const table = createTreeTable("tree_bug_copy_modif_refresh")
+        await table.inited
+
+        // 1. 创建源目录和子文件，初始 modif 设置为非常小的时间戳（如 10）
+        await table.createNodes([{ id: "dir1", name: "dir1", isDir: true, modif: 10 }], "/")
+        await table.createNodes([{ id: "file1", name: "file1.txt", isDir: false, modif: 10 }], "dir1")
+
+        // 稍作延迟
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        const copyStartTime = Date.now()
+
+        // 2. 递归复制 dir1 到根目录，重命名为 dir1 (1)
+        const result = await table.copyNodes(["dir1"], "/", { deep: true, renameOnCopy: true })
+        expect(result.createdNodeIds.length).toBe(1)
+        const copiedRootId = result.createdNodeIds[0]
+
+        // 3. 获取复制出来的新文件节点
+        const copiedFileList = await table.findMany({ parentId: copiedRootId, name: "file1.txt" })
+        expect(copiedFileList.length).toBe(1)
+        const copiedFile = copiedFileList[0]
+
+        // 验证新文件节点的 modif 属性已经从旧的 10 刷新为不小于复制操作开始时间的时间戳
+        expect(copiedFile?.modif).toBeGreaterThanOrEqual(copyStartTime)
+    })
+
+    test("updateNodes 开启 deep 且更新 parentId 时，应抛出错误以防止后代节点被平铺移动到目标父级", async () => {
+        const table = createTreeTable("tree_bug_update_nodes_deep_flatten")
+        await table.inited
+
+        // 1. 创建目录结构 dir1/child_file
+        await table.createNodes([{ id: "dir1", name: "dir1", isDir: true }], "/")
+        await table.createNodes([{ id: "child_file", name: "child.txt", isDir: false }], "dir1")
+
+        // 2. 创建目标父目录 target
+        await table.createNodes([{ id: "target", name: "target", isDir: true }], "/")
+
+        // 3. deep 递归更新不允许同时更新 parentId，否则后代会被一并改写为目标父级
+        await expect(
+            table.updateNodes(
+                { id: "dir1" },
+                { $set: { parentId: "target" } },
+                { deep: true },
+            ),
+        ).rejects.toThrow("deep 更新不能同时修改 parentId")
+
+        const dir1 = await table.get("dir1")
+        const child = await table.get("child_file")
+
+        // 验证这次非法更新没有落库
+        expect(dir1?.parentId).toBe("/")
+        expect(child?.parentId).toBe("dir1")
+    })
+
+    test("setNodes 在 replace 覆盖模式下替换已有的同名目录时，应当递归删除旧目录下原有的子孙节点", async () => {
+        const table = createTreeTable("tree_bug_replace_dir_cleanup_children")
+        await table.inited
+
+        // 1. 创建旧目录结构 dir1/old_child.txt
+        await table.createNodes([{ id: "dir1", name: "dir1", isDir: true }], "/")
+        await table.createNodes([{ id: "old_child", name: "old_child.txt", isDir: false }], "dir1")
+
+        // 验证旧子节点存在
+        expect(await table.get("old_child")).toBeDefined()
+
+        // 2. 使用 setNodes 在 replace 模式下，写入一个全新的同名目录 dir1
+        // 注意设置 uniqueBy: "name" 且 overwriteMode: "replace"
+        await table.setNodes([{ name: "dir1", isDir: true, parentId: "/" }], {
+            uniqueBy: "name",
+            overwriteMode: "replace",
+        })
+
+        // 3. 验证原本在旧目录下的子文件 old_child.txt 应该被递归删除
+        const oldChildAfter = await table.get("old_child")
+        expect(oldChildAfter).toBeUndefined()
     })
 })

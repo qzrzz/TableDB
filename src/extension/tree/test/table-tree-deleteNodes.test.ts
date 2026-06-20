@@ -112,6 +112,25 @@ describe("TableTree deleteNodes / unDeleteNodes 标记删除模式", () => {
         expect((await table.get("child-file", { ignoreMarkDelete: true }))?._isDeleted).toBe(true)
     })
 
+    test("同时删除父节点和后代节点时返回数量应按实际唯一节点计算", async () => {
+        const table = await createDefinedTreeTable("mark-parent-child-dedupe", true)
+        await createDeleteFixture(table)
+
+        const result = await table.deleteNodes(["dir", "child-dir", "deep-file"])
+
+        expect(result).toEqual({
+            hasDeleted: true,
+            hasChildDeleted: true,
+            deletedCount: 4,
+        })
+        expect(await table.get("dir")).toBeUndefined()
+        expect(await table.get("child-file")).toBeUndefined()
+        expect(await table.get("child-dir")).toBeUndefined()
+        expect(await table.get("deep-file")).toBeUndefined()
+        expect((await table.get("root"))?.ctotal).toBe(1)
+        expect((await table.get("root"))?.csize).toBe(5)
+    })
+
     test("unDeleteNodes 应恢复被标记删除的目录和全部后代", async () => {
         const table = await createDefinedTreeTable("mark-undelete-dir", true)
         await createDeleteFixture(table)
@@ -131,6 +150,22 @@ describe("TableTree deleteNodes / unDeleteNodes 标记删除模式", () => {
         expect((await table.get("root"))?.csize).toBe(35)
         expect((await table.get("dir"))?.ctotal).toBe(3)
         expect((await table.get("dir"))?.csize).toBe(30)
+    })
+
+    test("unDeleteNodes 恢复深层节点时应一并恢复被删除的祖先链", async () => {
+        const table = await createDefinedTreeTable("mark-undelete-deep-child", true)
+        await createDeleteFixture(table)
+
+        await table.deleteNodes(["dir"])
+        await table.unDeleteNodes(["deep-file"])
+
+        expect(await listChildIds(table, "root")).toEqual(["dir", "root-file"])
+        expect((await table.get("dir"))?._isDeleted).toBeUndefined()
+        expect((await table.get("child-dir"))?._isDeleted).toBeUndefined()
+        expect((await table.get("deep-file"))?.parentId).toBe("child-dir")
+        expect((await table.get("root"))?.ctotal).toBe(4)
+        expect((await table.get("root"))?.cftotal).toBe(2)
+        expect((await table.get("root"))?.csize).toBe(25)
     })
 
     test("unDeleteNodes 只恢复已删除节点，不应改变未删除同级节点", async () => {
@@ -159,6 +194,20 @@ describe("TableTree deleteNodes / unDeleteNodes 标记删除模式", () => {
         expect(await table.get("deep-file", { ignoreMarkDelete: true })).toBeUndefined()
         expect((await table.get("root"))?.ctotal).toBe(1)
         expect((await table.get("root"))?.csize).toBe(5)
+    })
+
+    test("开启 realDelete 时应能物理删除已经被标记删除的节点", async () => {
+        const table = await createDefinedTreeTable("mark-real-delete-marked-node", true)
+        await createDeleteFixture(table)
+
+        await table.deleteNodes(["child-file"])
+        expect((await table.get("child-file", { ignoreMarkDelete: true }))?._isDeleted).toBe(true)
+
+        await table.deleteNodes(["child-file"], { realDelete: true })
+
+        expect(await table.get("child-file", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("dir"))?.ctotal).toBe(2)
+        expect((await table.get("dir"))?.csize).toBe(20)
     })
 })
 

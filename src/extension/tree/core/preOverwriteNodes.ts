@@ -45,9 +45,8 @@ export async function preOverwriteNodes(
         if (value !== undefined) values.add(value)
     }
 
-    for (const nodeId of nodeIds) {
-        const node = await this.get(nodeId)
-        if (!node) continue
+    const moveRootNodes = await collectMoveRootNodes.call(this, nodeIds)
+    for (const node of moveRootNodes) {
         const value = getNodeValueByPath(node, uniqueBy)
         if (value !== undefined) values.add(value)
     }
@@ -71,4 +70,32 @@ export async function preOverwriteNodes(
         isConflict: existNodes.length > 0,
         existNodes,
     }
+}
+
+/** 预检移动节点时需要和 moveNodes 一样忽略已选中父节点下面的后代，避免报告不会发生的平铺冲突。 */
+async function collectMoveRootNodes(this: TableTree<ITreeNode>, nodeIds: string[]): Promise<ITreeNode[]> {
+    const uniqueNodeIds = Array.from(new Set(nodeIds)).filter(Boolean)
+    const nodes = (await Promise.all(uniqueNodeIds.map((nodeId) => this.get(nodeId)))).filter(
+        (node): node is ITreeNode => !!node,
+    )
+    const selectedIds = new Set(nodes.map((node) => node.id))
+    const roots: ITreeNode[] = []
+
+    for (const node of nodes) {
+        let parentId = node.parentId
+        let hasSelectedAncestor = false
+        while (parentId && parentId !== "/") {
+            if (selectedIds.has(parentId)) {
+                hasSelectedAncestor = true
+                break
+            }
+            const parentNode = await this.get(parentId, { ignoreMarkDelete: true })
+            parentId = parentNode?.parentId ?? "/"
+        }
+        if (!hasSelectedAncestor) {
+            roots.push(node)
+        }
+    }
+
+    return roots
 }

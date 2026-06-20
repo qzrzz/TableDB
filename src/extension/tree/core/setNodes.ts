@@ -6,7 +6,8 @@ import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
 import { resolveOverwriteNodes, type IResolveOverwriteNodesResult } from "../util/resolveOverwriteNodes"
 import { rebalanceTreeIndexes } from "../util/rebalanceTreeIndexes"
-import { assertTreeParentExists } from "../util/assertTreeParent"
+import { assertNotMoveIntoSelfOrDescendant, assertTreeParentExists } from "../util/assertTreeParent"
+import { collectDescendantNodes } from "../util/collectDescendantNodes"
 
 /** 设置节点选项 */
 export type ITreeSetNodesOptions = ITreeOverwriteOptions & {
@@ -82,10 +83,14 @@ export async function setNodes(
     const oldParentIds = await collectExistingParentIds.call(this, writableNodes)
 
     const overwriteResult = await applySetOverwrite.call(this, writableNodes, options)
-    const resolvedNodes = overwriteResult.nodes
+    const resolvedNodes = await filterUpdateOnlyVisibleNodes.call(this, overwriteResult.nodes, options)
+    if (isNoSetWrite(resolvedNodes, overwriteResult)) {
+        return buildNoSetWriteResult(presyncResult, options)
+    }
     const nodesByParentId = groupNodesByParentId(resolvedNodes)
 
     await assertSetNodeParents.call(this, resolvedNodes, nodesByParentId)
+    await assertSetNodeParentMoves.call(this, resolvedNodes)
 
     await applySetNodeIndexes.call(this, nodesByParentId, options)
 
@@ -94,6 +99,7 @@ export async function setNodes(
         : []
 
     await this.setMany(resolvedNodes, resolveSetManyOptions(options))
+    await restoreWrittenNodesVisibility.call(this, resolvedNodes)
     for (const [parentId, parentNodes] of nodesByParentId) {
         await rebalanceTreeIndexes(
             this,
@@ -123,6 +129,57 @@ export async function setNodes(
         ]))
     }
     return result
+}
+
+/** 没有可写节点且覆盖处理也没有副作用时，本次 setNodes 不应伪造变更时间。 */
+function isNoSetWrite(resolvedNodes: ITreeNode[], overwriteResult: IApplySetOverwriteResult): boolean {
+    return (
+        resolvedNodes.length === 0 &&
+        overwriteResult.deletedNodeIds.length === 0 &&
+        overwriteResult.mergedSourceNodeIds.length === 0
+    )
+}
+
+/** 构建无实际写入时的返回值，保留 presync 信息和调用方显式要求的 changedNodeIds。 */
+function buildNoSetWriteResult(
+    presyncResult: ITreePreSyncNodeResult | undefined,
+    options?: ITreeSetNodesOptions,
+): ITreeSetNodesResult {
+    const result: ITreeSetNodesResult = {
+        ...presyncResult,
+    }
+    if (options?.returnChangedNodesIds) {
+        result.changedNodeIds = []
+    }
+    return result
+}
+
+/** setNodes 表示写入一份当前有效节点，同 ID 命中已标记删除记录时需要恢复可见性。 */
+async function restoreWrittenNodesVisibility(this: TableTree<ITreeNode>, nodes: ITreeNode[]): Promise<void> {
+    const nodeIds = Array.from(new Set(nodes.map((node) => node.id))).filter(Boolean)
+    if (nodeIds.length === 0) return
+
+    await this.updateMany(
+        { id: { $in: nodeIds }, _isDeleted: true } as any,
+        { $unset: { _isDeleted: true, _deleteDate: true } as any },
+    )
+}
+
+/** updateOnly 遵循可见节点语义，已标记删除节点按不存在处理。 */
+async function filterUpdateOnlyVisibleNodes(
+    this: TableTree<ITreeNode>,
+    nodes: ITreeNode[],
+    options?: ITreeSetNodesOptions,
+): Promise<ITreeNode[]> {
+    if (!options?.updateOnly) return nodes
+
+    const visibleNodes: ITreeNode[] = []
+    for (const node of nodes) {
+        if (await this.has(node.id)) {
+            visibleNodes.push(node)
+        }
+    }
+    return visibleNodes
 }
 
 /** 收集 setNodes 需要返回的预同步结果，避免把 oldModif/oldCmodif 写入真实节点数据。 */
@@ -167,6 +224,39 @@ async function assertSetNodeParents(
             continue
         }
         await assertTreeParentExists(this, parentId)
+    }
+}
+
+/** setNodes 可以移动已有节点，写入前必须拒绝把节点挂到自己或现有后代下面，避免失败后留下循环父级。 */
+async function assertSetNodeParentMoves(this: TableTree<ITreeNode>, writableNodes: ITreeNode[]): Promise<void> {
+    assertNoBatchParentCycles(writableNodes)
+
+    for (const node of writableNodes) {
+        const oldNode = await this.get(node.id, { ignoreMarkDelete: true })
+        if (!oldNode || oldNode.parentId === node.parentId) {
+            continue
+        }
+        await assertNotMoveIntoSelfOrDescendant(this, [node.id], node.parentId)
+    }
+}
+
+/** 同一批次允许先写父再写子，但不能让批次内父级引用组成环。 */
+function assertNoBatchParentCycles(writableNodes: ITreeNode[]): void {
+    const parentIdByNodeId = new Map<string, string>()
+    for (const node of writableNodes) {
+        parentIdByNodeId.set(node.id, node.parentId)
+    }
+
+    for (const node of writableNodes) {
+        const visited = new Set<string>()
+        let parentId = node.parentId
+        while (parentId && parentId !== "/" && parentIdByNodeId.has(parentId)) {
+            if (parentId === node.id || visited.has(parentId)) {
+                throw new Error(`[TableTree] 检测到循环父级引用：${parentId}`)
+            }
+            visited.add(parentId)
+            parentId = parentIdByNodeId.get(parentId) ?? "/"
+        }
     }
 }
 
@@ -226,8 +316,11 @@ async function applySetOverwrite(
     const nextNodes: ITreeNode[] = []
     const deletedNodeIds: string[] = []
     const mergedSourceNodeIds: string[] = []
+    const replacedSourceIdByTargetId = new Map<string, string>()
+    const replacePairsForCleanup: IResolveOverwriteNodesResult<ITreeNode>["replacePairs"] = []
     let pendingNodes = [...nodes]
     const processedMergeSourceIds = new Set<string>()
+    const discardedBatchNodeIds = new Set<string>()
 
     while (pendingNodes.length > 0) {
         const nodesByParentId = groupNodesByParentId(pendingNodes)
@@ -237,11 +330,25 @@ async function applySetOverwrite(
             if (processedMergeSourceIds.has(parentId)) {
                 continue
             }
+            if (discardedBatchNodeIds.has(parentId)) {
+                for (const node of parentNodes) {
+                    discardedBatchNodeIds.add(node.id)
+                }
+                continue
+            }
             const resolved = await resolveOverwriteNodes(this, parentId, await hydrateMergeSourceNodes.call(this, parentNodes, options), options)
+            collectDiscardedBatchNodeIds(parentNodes, resolved, discardedBatchNodeIds)
             const targetSetResult = resolveTargetSetNodes(resolved)
+            replacePairsForCleanup.push(...resolved.replacePairs)
             if (targetSetResult.deleteNodeIds.length > 0) {
                 await this.deleteNodes(targetSetResult.deleteNodeIds)
                 deletedNodeIds.push(...targetSetResult.deleteNodeIds)
+            }
+
+            for (const pair of resolved.replacePairs) {
+                if (pair.sourceNode.id !== pair.targetNode.id) {
+                    replacedSourceIdByTargetId.set(pair.sourceNode.id, pair.targetNode.id)
+                }
             }
 
             for (const pair of resolved.mergePairs) {
@@ -271,10 +378,80 @@ async function applySetOverwrite(
         }
     }
 
+    reparentReplacedSourceChildren(nextNodes, replacedSourceIdByTargetId)
+    const replacedDescendantIds = await deleteReplacedTargetDescendants.call(this, replacePairsForCleanup, nextNodes)
+    deletedNodeIds.push(...replacedDescendantIds)
+
     return {
         nodes: nextNodes,
         deletedNodeIds: Array.from(new Set(deletedNodeIds)),
         mergedSourceNodeIds: Array.from(new Set(mergedSourceNodeIds)),
+    }
+}
+
+/** replace 复用目录 ID 后，本批次来源目录下的子节点也要跟着改挂到目标目录 ID 下。 */
+function reparentReplacedSourceChildren(nodes: ITreeNode[], replacedSourceIdByTargetId: Map<string, string>): void {
+    if (replacedSourceIdByTargetId.size === 0) return
+
+    let changed = true
+    while (changed) {
+        changed = false
+        for (const node of nodes) {
+            const nextParentId = replacedSourceIdByTargetId.get(node.parentId)
+            if (nextParentId && node.parentId !== nextParentId) {
+                node.parentId = nextParentId
+                changed = true
+            }
+        }
+    }
+}
+
+/** replace 复用目标节点 ID 时，需要清理目标目录原有子树，避免旧子节点残留在新节点下面。 */
+async function deleteReplacedTargetDescendants(
+    this: TableTree<ITreeNode>,
+    replacePairs: IResolveOverwriteNodesResult<ITreeNode>["replacePairs"],
+    nextNodes: ITreeNode[],
+): Promise<string[]> {
+    const reusableTargetIds = new Set<string>()
+    for (const pair of replacePairs) {
+        reusableTargetIds.add(pair.targetNode.id)
+    }
+
+    const nextNodeIds = new Set(nextNodes.map((node) => node.id))
+    const deletedIds: string[] = []
+    for (const targetId of reusableTargetIds) {
+        const descendants = await collectDescendantNodes(this, [targetId], {
+            ignoreMarkDelete: true,
+        })
+        const descendantIds = descendants
+            .map((node) => node.id)
+            .filter((nodeId) => !nextNodeIds.has(nodeId))
+        if (descendantIds.length > 0) {
+            await this.deleteNodes(descendantIds)
+            deletedIds.push(...descendantIds)
+        }
+    }
+    return deletedIds
+}
+
+/** 批次内冲突被跳过或替换掉的节点，其本批次子树也应跳过，避免写入失去父级的后代。 */
+function collectDiscardedBatchNodeIds(
+    inputNodes: ITreeNode[],
+    resolved: IResolveOverwriteNodesResult<ITreeNode>,
+    discardedNodeIds: Set<string>,
+): void {
+    const keptNodeIds = new Set<string>()
+    for (const node of resolved.nodes) {
+        keptNodeIds.add(node.id)
+    }
+    for (const pair of resolved.mergePairs) {
+        keptNodeIds.add(pair.sourceNode.id)
+    }
+
+    for (const node of inputNodes) {
+        if (!keptNodeIds.has(node.id)) {
+            discardedNodeIds.add(node.id)
+        }
     }
 }
 

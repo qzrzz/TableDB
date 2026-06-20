@@ -16,11 +16,12 @@ export async function collectDescendantNodes<TNode extends ITreeNode>(
 ): Promise<TNode[]> {
     const uniqueIds = Array.from(new Set(nodeIds)).filter(Boolean)
     const result: TNode[] = []
+    const resultNodeIds = new Set<string>()
 
     if (options?.includeSelf) {
         for (const nodeId of uniqueIds) {
             const node = await table.get(nodeId, { ignoreMarkDelete: options.ignoreMarkDelete })
-            if (node) result.push(node)
+            pushUniqueNode(result, resultNodeIds, node)
         }
     }
 
@@ -35,9 +36,23 @@ export async function collectDescendantNodes<TNode extends ITreeNode>(
             { parentId: { $in: nextParentIds } },
             { ignoreMarkDelete: options?.ignoreMarkDelete },
         )) as TNode[]
-        result.push(...children)
+        for (const child of children) {
+            pushUniqueNode(result, resultNodeIds, child)
+        }
         currentParentIds = children.map((node) => node.id)
     }
 
     return result
+}
+
+/** 输入同时包含父节点和后代节点时，同一个后代只能在结果中出现一次。 */
+function pushUniqueNode<TNode extends ITreeNode>(
+    result: TNode[],
+    resultNodeIds: Set<string>,
+    node: TNode | void | undefined,
+): void {
+    if (!node || resultNodeIds.has(node.id)) return
+
+    resultNodeIds.add(node.id)
+    result.push(node)
 }

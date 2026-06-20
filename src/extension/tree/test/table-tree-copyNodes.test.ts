@@ -151,6 +151,25 @@ describe("TableTree copyNodes", () => {
         expect((await table.findMany({ parentId: "target" })).filter((node) => node.name === "src")).toHaveLength(1)
     })
 
+    test("递归复制目录到自身后代目录下时不应把新副本再次纳入复制来源", async () => {
+        const table = await createDefinedTreeTable("copy-dir-into-descendant")
+        await createCopyFixture(table)
+
+        const result = await table.copyNodes(["src"], "src-dir", { deep: true, renameOnCopy: false })
+
+        expect(result.createdNodeIds).toHaveLength(1)
+        const copiedRootId = result.createdNodeIds[0]
+        const copiedRoot = await table.get(copiedRootId)
+        const copiedChildren = await table.findMany({ parentId: copiedRootId })
+        const copiedNestedDir = copiedChildren.find((node) => node.name === "lib")
+        const copiedNestedFiles = copiedNestedDir ? await table.findMany({ parentId: copiedNestedDir.id }) : []
+
+        expect(copiedRoot?.parentId).toBe("src-dir")
+        expect(copiedChildren.map((node) => node.name).sort()).toEqual(["index.ts", "lib"])
+        expect(copiedNestedFiles.map((node) => node.name)).toEqual(["deep.ts"])
+        expect(await table.findMany({ name: "src" })).toHaveLength(2)
+    })
+
     test("复制多个根节点时应按源节点顺序返回顶层创建 ID", async () => {
         const table = await createDefinedTreeTable("multi-root")
 
