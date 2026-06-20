@@ -44,6 +44,8 @@ interface IApplySetOverwriteResult {
     nodes: ITreeNode[]
     /** 覆盖策略中已经被删除的冲突节点 ID。 */
     deletedNodeIds: string[]
+    /** merge 后需要清理的来源目录 ID。 */
+    mergedSourceNodeIds: string[]
 }
 
 /**
@@ -99,6 +101,9 @@ export async function setNodes(
             parentNodes.map((node) => ({ id: node.id, index: node.index })),
         )
     }
+    if (overwriteResult.mergedSourceNodeIds.length > 0) {
+        await this.deleteNodes(overwriteResult.mergedSourceNodeIds)
+    }
     await refreshTreeMetadata(this, {
         parentIds: [...Array.from(nodesByParentId.keys()), ...oldParentIds],
         nodeIds: resolvedNodes.map((node) => node.id),
@@ -111,7 +116,11 @@ export async function setNodes(
         ...presyncResult,
     }
     if (options?.returnChangedNodesIds) {
-        result.changedNodeIds = Array.from(new Set([...writableChangedNodeIds, ...overwriteResult.deletedNodeIds]))
+        result.changedNodeIds = Array.from(new Set([
+            ...writableChangedNodeIds,
+            ...overwriteResult.deletedNodeIds,
+            ...overwriteResult.mergedSourceNodeIds,
+        ]))
     }
     return result
 }
@@ -216,6 +225,7 @@ async function applySetOverwrite(
 ): Promise<IApplySetOverwriteResult> {
     const nextNodes: ITreeNode[] = []
     const deletedNodeIds: string[] = []
+    const mergedSourceNodeIds: string[] = []
     let pendingNodes = [...nodes]
     const processedMergeSourceIds = new Set<string>()
 
@@ -227,7 +237,7 @@ async function applySetOverwrite(
             if (processedMergeSourceIds.has(parentId)) {
                 continue
             }
-            const resolved = await resolveOverwriteNodes(this, parentId, parentNodes, options)
+            const resolved = await resolveOverwriteNodes(this, parentId, await hydrateMergeSourceNodes.call(this, parentNodes, options), options)
             const targetSetResult = resolveTargetSetNodes(resolved)
             if (targetSetResult.deleteNodeIds.length > 0) {
                 await this.deleteNodes(targetSetResult.deleteNodeIds)
@@ -239,6 +249,7 @@ async function applySetOverwrite(
                     continue
                 }
                 processedMergeSourceIds.add(pair.sourceNode.id)
+                mergedSourceNodeIds.push(pair.sourceNode.id)
 
                 // merge 模式保留目标目录 ID，把来源目录的可写字段合并到目标目录上。
                 const targetUpdateNode = resolveMergeTargetUpdate(pair.sourceNode, pair.targetNode, options)
@@ -247,13 +258,12 @@ async function applySetOverwrite(
                 }
 
                 // 来源目录的直接子节点需要转移到目标目录下，下一轮继续处理子级冲突。
-                for (const node of nodes) {
-                    if (node.parentId === pair.sourceNode.id) {
-                        pendingNodes.push({
-                            ...node,
-                            parentId: pair.targetNode.id,
-                        })
-                    }
+                const sourceChildren = await collectMergeSourceChildren.call(this, pair.sourceNode.id, nodes)
+                for (const node of sourceChildren) {
+                    pendingNodes.push({
+                        ...node,
+                        parentId: pair.targetNode.id,
+                    })
                 }
             }
 
@@ -264,7 +274,46 @@ async function applySetOverwrite(
     return {
         nodes: nextNodes,
         deletedNodeIds: Array.from(new Set(deletedNodeIds)),
+        mergedSourceNodeIds: Array.from(new Set(mergedSourceNodeIds)),
     }
+}
+
+/** merge/mergeByModif 使用局部节点时，先用库中已有节点补齐目录类型等树语义字段。 */
+async function hydrateMergeSourceNodes(
+    this: TableTree<ITreeNode>,
+    nodes: ITreeNode[],
+    options?: ITreeSetNodesOptions,
+): Promise<ITreeNode[]> {
+    if (options?.overwriteMode !== "merge" && options?.overwriteMode !== "mergeByModif") {
+        return nodes
+    }
+
+    const nextNodes: ITreeNode[] = []
+    for (const node of nodes) {
+        const oldNode = await this.get(node.id, { ignoreMarkDelete: true })
+        nextNodes.push(oldNode ? { ...oldNode, ...node, isDir: oldNode.isDir } : node)
+    }
+    return nextNodes
+}
+
+/** 收集合并来源目录的直接子节点，包含本次待写入列表以及数据库里已经存在的子节点。 */
+async function collectMergeSourceChildren(
+    this: TableTree<ITreeNode>,
+    sourceNodeId: string,
+    nodes: ITreeNode[],
+): Promise<ITreeNode[]> {
+    const childrenById = new Map<string, ITreeNode>()
+    const dbChildren = await this.findMany({ parentId: sourceNodeId }, { sort: { index: 1 } }) as ITreeNode[]
+    for (const child of dbChildren) {
+        childrenById.set(child.id, child)
+    }
+    for (const node of nodes) {
+        if (node.parentId === sourceNodeId) {
+            // 本次传入的子节点优先级更高，用于保留调用方提供的新字段。
+            childrenById.set(node.id, { ...(childrenById.get(node.id) ?? {} as ITreeNode), ...node })
+        }
+    }
+    return Array.from(childrenById.values())
 }
 
 /** 计算需要返回给调用方的变更节点 ID，updateOnly 模式下只返回实际已存在并会被更新的节点。 */

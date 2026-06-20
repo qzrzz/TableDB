@@ -143,7 +143,7 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
         await table.createNodes([{ id: "file1", name: "file1.txt", isDir: false }], "dir")
 
-        // 2. 检查将 file1 移动到同级时（即仍然在 dir 下），按 name 预检不应报告冲突
+        // 2. 检查将 file1 移动 to 同级时（即仍然在 dir 下），按 name 预检不应报告冲突
         const checkResult = await table.preOverwriteNodes(
             [],
             ["file1"],
@@ -168,5 +168,31 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         const node = await table.get("file1")
         // 应保留用户传入的排序索引
         expect(node?.index).toBe("custom-idx")
+    })
+
+    test("setNodes 在进行目录合并 (merge) 时，应该正确移动数据库中已存在的源目录子节点，并清理旧目录", async () => {
+        const table = createTreeTable("tree_bug_set_nodes_merge")
+        await table.inited
+
+        // 1. 创建源目录 src 及其子文件 file_src
+        await table.createNodes([{ id: "src", name: "src", isDir: true }], "/")
+        await table.createNodes([{ id: "file_src", name: "file.txt", isDir: false }], "src")
+
+        // 2. 创建目标目录 target
+        await table.createNodes([{ id: "target", name: "target", isDir: true }], "/")
+
+        // 3. 调用 setNodes 将 src 重命名为 target，触发合并
+        await table.setNodes(
+            [{ id: "src", name: "target", parentId: "/" }],
+            { uniqueBy: "name", overwriteMode: "merge" }
+        )
+
+        // 验证源目录已不复存在（或被标记删除）
+        const oldSrc = await table.get("src")
+        expect(oldSrc).toBeUndefined()
+
+        // 验证源目录下的子文件已被正确移动到目标目录 target 下
+        const file = await table.get("file_src")
+        expect(file?.parentId).toBe("target")
     })
 })
