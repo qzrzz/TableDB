@@ -186,6 +186,43 @@ describe("TableTree setNodes", () => {
         expect(await table.get("incoming")).toBeUndefined()
     })
 
+    test("replace 覆盖策略应处理批次内部同名冲突并只保留最后一个写入节点", async () => {
+        const table = await createDefinedTreeTable("replace-batch-conflict")
+
+        await table.setNodes(
+            [
+                { id: "first", parentId: "/", name: "same.txt", isDir: false, tag: "first" },
+                { id: "last", parentId: "/", name: "same.txt", isDir: false, tag: "last" },
+            ],
+            { uniqueBy: "name", overwriteMode: "replace", returnChangedNodesIds: true },
+        )
+
+        const activeNodes = await table.findMany({ parentId: "/", name: "same.txt" })
+        expect(activeNodes).toHaveLength(1)
+        expect(activeNodes[0].id).toBe("last")
+        expect(activeNodes[0].tag).toBe("last")
+        expect(await table.get("first")).toBeUndefined()
+    })
+
+    test("replace 覆盖策略同时遇到已有目标和批次内部冲突时应复用已有目标 ID", async () => {
+        const table = await createDefinedTreeTable("replace-existing-and-batch-conflict")
+
+        await table.createNodes([{ id: "old", name: "same.txt", isDir: false, tag: "old" }], "/")
+        await table.setNodes(
+            [
+                { id: "incoming-a", parentId: "/", name: "same.txt", isDir: false, tag: "incoming-a" },
+                { id: "incoming-b", parentId: "/", name: "same.txt", isDir: false, tag: "incoming-b" },
+            ],
+            { uniqueBy: "name", overwriteMode: "replace" },
+        )
+
+        const activeNodes = await table.findMany({ parentId: "/", name: "same.txt" })
+        expect(activeNodes).toHaveLength(1)
+        expect((await table.get("old"))?.tag).toBe("incoming-b")
+        expect(await table.get("incoming-a")).toBeUndefined()
+        expect(await table.get("incoming-b")).toBeUndefined()
+    })
+
     test("skip 覆盖策略应跳过冲突节点", async () => {
         const table = await createDefinedTreeTable("skip")
 
@@ -218,6 +255,21 @@ describe("TableTree setNodes", () => {
         expect((await table.get("incoming"))?.name).toBe("文件 (2).txt")
     })
 
+    test("newName 覆盖策略应处理批次内部重名并生成互不冲突的名称", async () => {
+        const table = await createDefinedTreeTable("new-name-batch-conflict")
+
+        await table.setNodes(
+            [
+                { id: "file-a", parentId: "/", name: "文件.txt", isDir: false },
+                { id: "file-b", parentId: "/", name: "文件.txt", isDir: false },
+            ],
+            { uniqueBy: "name", overwriteMode: "newName" },
+        )
+
+        const names = (await table.findMany({ parentId: "/" }, { sort: { name: 1 } })).map((node) => node.name)
+        expect(names).toEqual(["文件 (1).txt", "文件.txt"])
+    })
+
     test("merge 覆盖策略应递归合并目录子节点", async () => {
         const table = await createDefinedTreeTable("merge")
 
@@ -236,6 +288,49 @@ describe("TableTree setNodes", () => {
         expect((await table.get("incoming-file"))?.parentId).toBe("target")
         expect((await table.get("target"))?.ctotal).toBe(2)
         expect((await table.get("target"))?.csize).toBe(12)
+    })
+
+    test("merge 覆盖策略应支持局部更新已有源目录并迁移数据库中的子节点", async () => {
+        const table = await createDefinedTreeTable("merge-existing-source-partial")
+
+        await table.createNodes([{ id: "src", name: "src", isDir: true, tag: "source" }], "/")
+        await table.createNodes([{ id: "source-file", name: "source.txt", isDir: false, size: 7 }], "src")
+        await table.createNodes([{ id: "target", name: "target", isDir: true, tag: "target" }], "/")
+        await table.createNodes([{ id: "target-file", name: "target.txt", isDir: false, size: 5 }], "target")
+
+        await table.setNodes([{ id: "src", parentId: "/", name: "target", tag: "source-new" }], {
+            uniqueBy: "name",
+            overwriteMode: "merge",
+        })
+
+        expect(await table.get("src")).toBeUndefined()
+        expect((await table.get("source-file"))?.parentId).toBe("target")
+        expect((await table.get("target"))?.tag).toBe("source-new")
+        expect((await table.get("target"))?.isDir).toBe(true)
+        expect((await table.get("target"))?.ctotal).toBe(2)
+        expect((await table.get("target"))?.csize).toBe(12)
+    })
+
+    test("merge 覆盖策略应同时迁移数据库子节点和本次传入的新增子节点", async () => {
+        const table = await createDefinedTreeTable("merge-db-and-incoming-children")
+
+        await table.createNodes([{ id: "src", name: "src", isDir: true }], "/")
+        await table.createNodes([{ id: "db-child", name: "db.txt", isDir: false, size: 3 }], "src")
+        await table.createNodes([{ id: "target", name: "target", isDir: true }], "/")
+
+        await table.setNodes(
+            [
+                { id: "src", parentId: "/", name: "target" },
+                { id: "incoming-child", parentId: "src", name: "incoming.txt", isDir: false, size: 4 },
+            ],
+            { uniqueBy: "name", overwriteMode: "merge" },
+        )
+
+        expect(await table.get("src")).toBeUndefined()
+        expect((await table.get("db-child"))?.parentId).toBe("target")
+        expect((await table.get("incoming-child"))?.parentId).toBe("target")
+        expect((await table.get("target"))?.ctotal).toBe(2)
+        expect((await table.get("target"))?.csize).toBe(7)
     })
 
     test("mergeByModif 应保留较新的目标目录字段并继续合并子节点", async () => {
@@ -325,6 +420,38 @@ describe("TableTree setNodes", () => {
         expect(node?.name).toBe("old.txt")
         expect(node?.tag).toBe("new")
         expect(await table.get("incoming")).toBeUndefined()
+    })
+
+    test("uniqueBy 点路径在 replace 模式下应处理批次内部冲突", async () => {
+        const table = await createDefinedTreeTable("unique-path-batch-conflict")
+
+        await table.setNodes(
+            [
+                {
+                    id: "incoming-a",
+                    parentId: "/",
+                    name: "a.txt",
+                    isDir: false,
+                    meta: { hash_md5: "same-hash" },
+                    tag: "a",
+                },
+                {
+                    id: "incoming-b",
+                    parentId: "/",
+                    name: "b.txt",
+                    isDir: false,
+                    meta: { hash_md5: "same-hash" },
+                    tag: "b",
+                },
+            ],
+            { uniqueBy: "meta.hash_md5", overwriteMode: "replace" },
+        )
+
+        const activeNodes = await table.findMany({ "meta.hash_md5": "same-hash" } as any)
+        expect(activeNodes).toHaveLength(1)
+        expect(activeNodes[0].id).toBe("incoming-b")
+        expect(activeNodes[0].tag).toBe("b")
+        expect(await table.get("incoming-a")).toBeUndefined()
     })
 
     test("presync 应返回过期和已删除节点信息并剥离 oldModif 字段", async () => {

@@ -28,9 +28,10 @@ export async function moveNodes(
     if (uniqueNodeIds.length === 0) return {}
     await assertTreeParentExists(this, parentId)
 
-    const nodes = (await Promise.all(uniqueNodeIds.map((nodeId) => this.get(nodeId)))).filter(
+    const sourceNodes = (await Promise.all(uniqueNodeIds.map((nodeId) => this.get(nodeId)))).filter(
         (node): node is ITreeNode => !!node,
     )
+    const nodes = await filterNestedMoveRoots.call(this, sourceNodes)
     if (nodes.length === 0) return {}
 
     await assertNotMoveIntoSelfOrDescendant(this, nodes.map((node) => node.id), parentId)
@@ -98,4 +99,31 @@ async function mergeMoveDir(
         await this.moveNodes(children.map((child) => child.id), targetNode.id, options)
     }
     await this.deleteNodes([sourceNode.id])
+}
+
+async function filterNestedMoveRoots(
+    this: TableTree<ITreeNode>,
+    nodes: ITreeNode[],
+): Promise<ITreeNode[]> {
+    const selectedIds = new Set(nodes.map((node) => node.id))
+    const roots: ITreeNode[] = []
+
+    for (const node of nodes) {
+        let parentId = node.parentId
+        let hasSelectedAncestor = false
+        while (parentId && parentId !== "/") {
+            if (selectedIds.has(parentId)) {
+                hasSelectedAncestor = true
+                break
+            }
+            const parentNode = await this.get(parentId, { ignoreMarkDelete: true })
+            parentId = parentNode?.parentId ?? "/"
+        }
+        // 批量移动时如果父目录已被选中，子节点会随父目录一起移动，不应再被单独平铺移动。
+        if (!hasSelectedAncestor) {
+            roots.push(node)
+        }
+    }
+
+    return roots
 }
