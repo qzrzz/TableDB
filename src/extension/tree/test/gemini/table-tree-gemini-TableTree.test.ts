@@ -156,7 +156,7 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         expect(checkResult.existNodes).toEqual([])
     })
 
-    test("createNodes 创建节点时应该保留传入节点对象上自带的 index，而不应直接将其覆盖丢弃", async () => {
+    test("createNodes 创建节点时应该保留传入节点对象上自带 of index，而不应直接将其覆盖丢弃", async () => {
         const table = createTreeTable("tree_bug_create_nodes_keeps_index")
         await table.inited
 
@@ -194,5 +194,79 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         // 验证源目录下的子文件已被正确移动到目标目录 target 下
         const file = await table.get("file_src")
         expect(file?.parentId).toBe("target")
+    })
+
+    test("moveNodes 批量移动多个节点时，如果这批节点中存在同名冲突，应该遵循冲突覆盖策略处理", async () => {
+        const table = createTreeTable("tree_bug_batch_move_self_conflict")
+        await table.inited
+
+        // 1. 创建两个源目录，每个目录下面都有一个同名 file.txt
+        await table.createNodes([{ id: "dir1", name: "dir1", isDir: true }], "/")
+        await table.createNodes([{ id: "dir2", name: "dir2", isDir: true }], "/")
+        await table.createNodes([{ id: "f1", name: "file.txt", isDir: false }], "dir1")
+        await table.createNodes([{ id: "f2", name: "file.txt", isDir: false }], "dir2")
+
+        // 2. 创建目标目录
+        await table.createNodes([{ id: "target", name: "target", isDir: true }], "/")
+
+        // 3. 批量将这两个同名文件移动到目标目录下，设置唯一属性为 name，覆盖策略为 newName
+        await table.moveNodes(["f1", "f2"], "target", {
+            uniqueBy: "name",
+            overwriteMode: "newName",
+        })
+
+        const file1 = await table.get("f1")
+        const file2 = await table.get("f2")
+
+        // 验证它们都被移动到了 target 下
+        expect(file1?.parentId).toBe("target")
+        expect(file2?.parentId).toBe("target")
+
+        // 验证两个文件的名字不能完全相同（由于 uniqueBy: name 且 newName，其中一个应该重命名，例如 file (1).txt）
+        const names = [file1?.name, file2?.name]
+        expect(names).toContain("file.txt")
+        expect(names).toContain("file (1).txt")
+    })
+
+    test("setNodes 批量写入多个包含内部同名冲突的节点时，在 replace 覆盖模式下应确保同级唯一约束不被破坏", async () => {
+        const table = createTreeTable("tree_bug_batch_set_internal_conflict")
+        await table.inited
+
+        // 批量向 "/" 写入两个同名为 "conflict.txt" 的文件
+        await table.setNodes([
+            { id: "node1", name: "conflict.txt", parentId: "/", isDir: false },
+            { id: "node2", name: "conflict.txt", parentId: "/", isDir: false },
+        ], {
+            uniqueBy: "name",
+            overwriteMode: "replace",
+        })
+
+        // 查找根目录下名称为 "conflict.txt" 的有效节点
+        const activeNodes = await table.findMany({ parentId: "/", name: "conflict.txt" })
+        // 应该只有 1 个文件，另一个文件由于被覆盖，不应该同时存在
+        expect(activeNodes.length).toBe(1)
+    })
+
+    test("moveNodes 批量移动节点时，如果同时移动了父目录和其子节点，子节点应该保留在父目录下，而不应被平铺移动到目标目录", async () => {
+        const table = createTreeTable("tree_bug_move_nodes_nested_flatten")
+        await table.inited
+
+        // 1. 创建源目录结构: dir1/child_file
+        await table.createNodes([{ id: "dir1", name: "dir1", isDir: true }], "/")
+        await table.createNodes([{ id: "child_file", name: "child.txt", isDir: false }], "dir1")
+
+        // 2. 创建目标目录 target
+        await table.createNodes([{ id: "target", name: "target", isDir: true }], "/")
+
+        // 3. 批量将 dir1 及其子文件 child_file 移动到 target
+        await table.moveNodes(["dir1", "child_file"], "target")
+
+        const dir1 = await table.get("dir1")
+        const child = await table.get("child_file")
+
+        // 验证 dir1 被移动到 target 下
+        expect(dir1?.parentId).toBe("target")
+        // 验证子文件应仍然在 dir1 下，而不是被平铺直接移动到 target 下
+        expect(child?.parentId).toBe("dir1")
     })
 })

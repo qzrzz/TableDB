@@ -40,8 +40,11 @@ export async function resolveOverwriteNodes<TNode extends ITreeNode>(
     }
 
     if (nodes.length === 0) return result
+    const resolvedNodes = mode === "replace"
+        ? resolveReplaceBatchConflicts(nodes, uniqueBy)
+        : nodes
 
-    const conflictValues = nodes
+    const conflictValues = resolvedNodes
         .map((node) => getNodeValueByPath(node, uniqueBy))
         .filter((value) => value !== undefined)
     const conflictNodes = conflictValues.length
@@ -55,12 +58,12 @@ export async function resolveOverwriteNodes<TNode extends ITreeNode>(
             .filter((node) => !ignoreNodeIds.has(node.id))
             .map((node) => node.name)
             .filter((name): name is string => typeof name === "string")
-        const nextNames = await getUniqueFileNames(nodes.map((node) => node.name), existsNames)
-        result.nodes = nodes.map((node, index) => ({ ...node, name: nextNames[index] }))
+        const nextNames = await getUniqueFileNames(resolvedNodes.map((node) => node.name), existsNames)
+        result.nodes = resolvedNodes.map((node, index) => ({ ...node, name: nextNames[index] }))
         return result
     }
 
-    for (const node of nodes) {
+    for (const node of resolvedNodes) {
         const value = getNodeValueByPath(node, uniqueBy)
         const conflicts = conflictNodes.filter((item) => {
             return !ignoreNodeIds.has(item.id) && item.id !== node.id && getNodeValueByPath(item, uniqueBy) === value
@@ -103,4 +106,19 @@ export async function resolveOverwriteNodes<TNode extends ITreeNode>(
 
     result.deleteNodeIds = Array.from(new Set(result.deleteNodeIds))
     return result
+}
+
+/** replace 模式下批次内同级同名节点互相覆盖，保留最后一个写入意图。 */
+function resolveReplaceBatchConflicts<TNode extends ITreeNode>(nodes: TNode[], uniqueBy: string): TNode[] {
+    const nodeByConflictKey = new Map<any, TNode>()
+    const nodesWithoutConflictKey: TNode[] = []
+    for (const node of nodes) {
+        const value = getNodeValueByPath(node, uniqueBy)
+        if (value === undefined) {
+            nodesWithoutConflictKey.push(node)
+            continue
+        }
+        nodeByConflictKey.set(value, node)
+    }
+    return [...nodesWithoutConflictKey, ...nodeByConflictKey.values()]
 }
