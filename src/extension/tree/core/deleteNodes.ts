@@ -49,7 +49,8 @@ export async function deleteNodes(
     const parentIds = Array.from(new Set(nodes.map((node) => node.parentId)))
     const modif = Date.now()
 
-    if (options?.realDelete) {
+    const shouldRealDelete = options?.realDelete === true || this.options?.enableMarkDelete !== true
+    if (shouldRealDelete) {
         await this.deleteMany({ id: { $in: deleteIds } }, { readDelete: true })
     } else {
         await this.updateMany(

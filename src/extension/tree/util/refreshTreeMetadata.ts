@@ -51,10 +51,24 @@ export async function refreshTreeMetadata<TNode extends ITreeNode>(
         }
     }
 
-    const orderedIds = Array.from(refreshIds)
+    const orderedIds = await sortRefreshIdsByDepth(table, Array.from(refreshIds))
     for (const nodeId of orderedIds) {
         await refreshOneNode(table, nodeId, cmodifNodeIds.has(nodeId) ? options.cmodif : undefined)
     }
+}
+
+async function sortRefreshIdsByDepth<TNode extends ITreeNode>(
+    table: TableTree<TNode>,
+    nodeIds: string[],
+): Promise<string[]> {
+    const depthByNodeId = new Map<string, number>()
+    for (const nodeId of nodeIds) {
+        depthByNodeId.set(nodeId, (await collectAncestorIds(table, nodeId)).length)
+    }
+
+    return nodeIds.sort((left, right) => {
+        return (depthByNodeId.get(right) ?? 0) - (depthByNodeId.get(left) ?? 0)
+    })
 }
 
 async function refreshOneNode<TNode extends ITreeNode>(
@@ -107,7 +121,7 @@ function setNumberStat(
 }
 
 function isExistingStatChanged(oldValue: number | undefined, newValue: number): boolean {
-    return oldValue !== undefined && oldValue !== newValue
+    return oldValue !== newValue && (oldValue !== undefined || newValue > 0)
 }
 
 async function calcChildrenStats<TNode extends ITreeNode>(

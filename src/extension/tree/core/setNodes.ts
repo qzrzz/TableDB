@@ -1,6 +1,6 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode, ITreeOverwriteOptions, ITreeIndexOptions, ITreeChangeResult } from "../tree.types"
-import { ITreePreSyncNodeResult } from "./presyncNodes"
+import type { ITreePreSyncNodeResult } from "./presyncNodes"
 import { normalizeWritableNode } from "../util/normalizeWritableNode"
 import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
@@ -18,7 +18,7 @@ export type ITreeSetNodesOptions = ITreeOverwriteOptions & {
 
     /**
      * 是否进行预同步（pre-sync）检查。
-     * 返回
+     * 开启后会根据传入节点里的 oldModif/oldCmodif 返回过期、缺失等同步状态。
      */
     presync?: boolean
 
@@ -46,18 +46,19 @@ interface IApplySetOverwriteResult {
     deletedNodeIds: string[]
 }
 
-/** 设置节点
- *  设置节点数据，已存在的节点会被覆盖，不存在的节点会被创建
+/**
+ * 设置节点
+ *
+ * 设置节点数据，已存在的节点会被覆盖，不存在的节点会被创建。
  *
  *  如果在 `nodes` 中提供了 `oldModif`, `oldCmodif` 字段，它们会被用来进行预同步检查（pre-sync）而不会被设置到节点上。
  *
- *  流程：
- *  1. 创建本次操作的 newModif
- *  2. 根据 ITreeOverwriteOptions 的配置，找出所有受影响的节点
- *  3. 如果 options.presync 为 true，并且提供了 oldModif/oldCmodif 收集信息
- *  4. 更新数据（使用 Table.setMany() 方法实现）
- *  5. 如果有 index 配置，更新排序索引
- *  6. 进行 metadata 维护
+ * 流程：
+ * 1. 生成本次写入统一使用的 modif。
+ * 2. 按需执行 presync，并剥离只用于同步检查的 oldModif/oldCmodif。
+ * 3. 根据覆盖策略解析最终要写入的节点，以及需要删除的冲突节点。
+ * 4. 校验父节点、补齐排序索引，并写入节点数据。
+ * 5. 重排受影响父级的 index，并刷新父级/祖先级 metadata。
  *
  * 要注意如果修改了节点的 parentId 需要触发相应的 metadata 变更，并且遵守 ITreeOverwriteOptions 覆盖设置和 index 规则
  */
@@ -72,38 +73,25 @@ export async function setNodes(
     }
 
     const modif = Date.now()
-    const presyncResult = options?.presync
-        ? await this.presyncNodes(
-              nodes
-                  .filter((node: any) => node.id && (node.oldModif !== undefined || node.oldCmodif !== undefined))
-                  .map((node: any) => ({ id: node.id, modif: node.oldModif, cmodif: node.oldCmodif })),
-          )
-        : undefined
+    const presyncResult = await collectSetPresyncResult.call(this, nodes, options)
+    const writableNodes = prepareWritableNodes(nodes, modif)
 
-    let writableNodes = nodes.map((node) => {
-        const { oldModif, oldCmodif, ...nodeData } = node as any
-        return normalizeWritableNode(nodeData, { modif }) as ITreeNode
-    })
+    // 先记录原父级，用于 parentId 被修改后刷新旧父级和旧祖先链的统计字段。
     const oldParentIds = await collectExistingParentIds.call(this, writableNodes)
 
     const overwriteResult = await applySetOverwrite.call(this, writableNodes, options)
-    writableNodes = overwriteResult.nodes
+    const resolvedNodes = overwriteResult.nodes
+    const nodesByParentId = groupNodesByParentId(resolvedNodes)
 
-    const nodesByParentId = new Map<string, ITreeNode[]>()
-    for (const node of writableNodes) {
-        const list = nodesByParentId.get(node.parentId) ?? []
-        list.push(node)
-        nodesByParentId.set(node.parentId, list)
-    }
-    await assertSetNodeParents.call(this, writableNodes, nodesByParentId)
+    await assertSetNodeParents.call(this, resolvedNodes, nodesByParentId)
 
     await applySetNodeIndexes.call(this, nodesByParentId, options)
 
     const writableChangedNodeIds = options?.returnChangedNodesIds
-        ? await collectWritableChangedNodeIds.call(this, writableNodes, options)
+        ? await collectWritableChangedNodeIds.call(this, resolvedNodes, options)
         : []
 
-    await this.setMany(writableNodes, resolveSetManyOptions(options))
+    await this.setMany(resolvedNodes, resolveSetManyOptions(options))
     for (const [parentId, parentNodes] of nodesByParentId) {
         await rebalanceTreeIndexes(
             this,
@@ -113,7 +101,7 @@ export async function setNodes(
     }
     await refreshTreeMetadata(this, {
         parentIds: [...Array.from(nodesByParentId.keys()), ...oldParentIds],
-        nodeIds: writableNodes.map((node) => node.id),
+        nodeIds: resolvedNodes.map((node) => node.id),
         cmodif: modif,
     })
 
@@ -126,6 +114,30 @@ export async function setNodes(
         result.changedNodeIds = Array.from(new Set([...writableChangedNodeIds, ...overwriteResult.deletedNodeIds]))
     }
     return result
+}
+
+async function collectSetPresyncResult(
+    this: TableTree<ITreeNode>,
+    nodes: Partial<ITreeNode>[],
+    options?: ITreeSetNodesOptions,
+): Promise<ITreePreSyncNodeResult | undefined> {
+    if (!options?.presync) {
+        return undefined
+    }
+
+    // oldModif/oldCmodif 是客户端同步检查字段，只参与 presync，不应写入节点正文。
+    const presyncNodes = nodes
+        .filter((node: any) => node.id && (node.oldModif !== undefined || node.oldCmodif !== undefined))
+        .map((node: any) => ({ id: node.id, modif: node.oldModif, cmodif: node.oldCmodif }))
+
+    return this.presyncNodes(presyncNodes)
+}
+
+function prepareWritableNodes(nodes: Partial<ITreeNode>[], modif: number): ITreeNode[] {
+    return nodes.map((node) => {
+        const { oldModif, oldCmodif, ...nodeData } = node as any
+        return normalizeWritableNode(nodeData, { modif }) as ITreeNode
+    })
 }
 
 async function assertSetNodeParents(
@@ -149,6 +161,7 @@ async function applySetNodeIndexes(
 ): Promise<void> {
     for (const [parentId, parentNodes] of nodesByParentId) {
         if (options?.index) {
+            // 显式传入 index 选项时，整批节点按同一个插入位置重新分配排序值。
             const indexes = await resolveTreeIndexes(this, parentId, parentNodes.length, options.index)
             for (let i = 0; i < parentNodes.length; i++) {
                 parentNodes[i].index = indexes[i]
@@ -160,6 +173,7 @@ async function applySetNodeIndexes(
         for (const node of parentNodes) {
             const oldNode = await this.get(node.id, { ignoreMarkDelete: true })
             if (oldNode && oldNode.parentId === node.parentId) {
+                // 同父级更新时尽量保留原排序，避免普通字段更新改变节点位置。
                 node.index = node.index || oldNode.index || ""
                 continue
             }
@@ -169,6 +183,7 @@ async function applySetNodeIndexes(
         }
 
         if (nodesNeedIndex.length > 0) {
+            // 新节点或跨父级移动的节点如果没有 index，则追加到当前父级的末尾。
             const indexes = await resolveTreeIndexes(this, parentId, nodesNeedIndex.length)
             for (let i = 0; i < nodesNeedIndex.length; i++) {
                 nodesNeedIndex[i].index = indexes[i]
@@ -196,7 +211,7 @@ async function applySetOverwrite(
                 continue
             }
             const resolved = await resolveOverwriteNodes(this, parentId, parentNodes, options)
-            const targetSetResult = resolveTargetSetNodes(resolved, options)
+            const targetSetResult = resolveTargetSetNodes(resolved)
             if (targetSetResult.deleteNodeIds.length > 0) {
                 await this.deleteNodes(targetSetResult.deleteNodeIds)
                 deletedNodeIds.push(...targetSetResult.deleteNodeIds)
@@ -208,11 +223,13 @@ async function applySetOverwrite(
                 }
                 processedMergeSourceIds.add(pair.sourceNode.id)
 
+                // merge 模式保留目标目录 ID，把来源目录的可写字段合并到目标目录上。
                 const targetUpdateNode = resolveMergeTargetUpdate(pair.sourceNode, pair.targetNode, options)
                 if (targetUpdateNode) {
                     nextNodes.push(targetUpdateNode)
                 }
 
+                // 来源目录的直接子节点需要转移到目标目录下，下一轮继续处理子级冲突。
                 for (const node of nodes) {
                     if (node.parentId === pair.sourceNode.id) {
                         pendingNodes.push({
@@ -262,7 +279,6 @@ function resolveSetManyOptions(options?: ITreeSetNodesOptions) {
 
 function resolveTargetSetNodes(
     resolved: IResolveOverwriteNodesResult<ITreeNode>,
-    options?: ITreeSetNodesOptions,
 ): { nodes: ITreeNode[]; deleteNodeIds: string[] } {
     if (resolved.replacePairs.length === 0) {
         return {
@@ -285,6 +301,7 @@ function resolveTargetSetNodes(
         const [firstPair, ...extraPairs] = pairs
         consumedSourceIds.add(firstPair.sourceNode.id)
         deleteNodeIds.delete(firstPair.targetNode.id)
+        // 一个来源节点命中多个目标冲突时，只复用第一个目标 ID，其余目标仍然需要删除。
         for (const pair of extraPairs) {
             deleteNodeIds.add(pair.targetNode.id)
         }

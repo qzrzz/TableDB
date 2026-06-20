@@ -80,6 +80,26 @@ describe("TableTree setNodes", () => {
         expect(dir?.csize).toBe(5)
     })
 
+    test("应该支持同一批次内创建多层节点并正确刷新祖先统计", async () => {
+        const table = await createDefinedTreeTable("batch-deep-parent")
+
+        await table.setNodes([
+            { id: "dir1", name: "dir1", isDir: true, parentId: "/" },
+            { id: "dir2", name: "dir2", isDir: true, parentId: "dir1" },
+            { id: "file1", name: "file1.txt", isDir: false, size: 100, parentId: "dir2" },
+        ])
+
+        const dir1 = await table.get("dir1")
+        const dir2 = await table.get("dir2")
+        expect((await table.get("file1"))?.parentId).toBe("dir2")
+        expect(dir2?.ctotal).toBe(1)
+        expect(dir2?.cftotal).toBe(1)
+        expect(dir2?.csize).toBe(100)
+        expect(dir1?.ctotal).toBe(2)
+        expect(dir1?.cftotal).toBe(1)
+        expect(dir1?.csize).toBe(100)
+    })
+
     test("应该拒绝不存在的父级和非法节点名称", async () => {
         const table = await createDefinedTreeTable("guard")
 
