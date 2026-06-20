@@ -56,7 +56,8 @@ export async function preOverwriteNodes(
         return { isConflict: false, existNodes: [] }
     }
 
-    const existNodes = await this.findMany(
+    const movingNodeIds = new Set(nodeIds)
+    const existNodes = (await this.findMany(
         {
             parentId,
             [uniqueBy]: { $in: Array.from(values) },
@@ -64,7 +65,7 @@ export async function preOverwriteNodes(
         {
             projection: options?.projection,
         },
-    )
+    )).filter((node) => !movingNodeIds.has(node.id))
 
     return {
         isConflict: existNodes.length > 0,

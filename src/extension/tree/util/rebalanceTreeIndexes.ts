@@ -35,10 +35,12 @@ export async function rebalanceTreeIndexes<TNode extends ITreeNode>(
                 ) as any
             },
             setIndexes: async (reqs) => {
+                const modif = Date.now()
                 await table.bulkUpdate(
                     reqs.map((req) => ({
                         filter: "id" in req ? { id: req.id } : { parentId, index: req.index },
-                        updateOp: { $set: { index: req.newIndex } as any },
+                        // index 重排会改变节点排序状态，需要同步更新节点自身的修改计数。
+                        updateOp: { $set: { index: req.newIndex, modif } as any },
                     })),
                 )
             },
@@ -46,6 +48,6 @@ export async function rebalanceTreeIndexes<TNode extends ITreeNode>(
     )
 
     if (result.rebalanced) {
-        await refreshTreeMetadata(table, { parentIds: [parentId] })
+        await refreshTreeMetadata(table, { parentIds: [parentId], cmodif: Date.now() })
     }
 }

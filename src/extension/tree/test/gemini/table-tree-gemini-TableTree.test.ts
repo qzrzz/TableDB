@@ -1,6 +1,7 @@
 import { SQLiteAdapter } from "../../../../adapter/SQLite"
 import { TableTree } from "../../TableTree"
 import type { ITreeNode } from "../../tree.types"
+import { rebalanceTreeIndexes } from "../../util/rebalanceTreeIndexes"
 
 function createTreeTable(name: string) {
     return new TableTree<ITreeNode>({
@@ -41,7 +42,7 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         const table = createTreeTable("tree_bug_modif_update")
         await table.inited
 
-        // 1. 创建一个初始为空的目录
+        // 1. 创建一个初始为空 neighborhood 的目录
         await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
         const dirInit = await table.get("dir")
         expect(dirInit?.ctotal).toBeUndefined()
@@ -92,5 +93,80 @@ describe("TableTree 目录树 BUG 测试 (Gemini)", () => {
         expect(copiedRoot?.ctotal).toBe(2)
         expect(copiedRoot?.cftotal).toBe(1)
         expect(copiedRoot?.csize).toBe(100)
+    })
+
+    test("当触发索引重排 (rebalance) 时，受影响节点的 modif 和父目录的 cmodif 应该被更新", async () => {
+        const table = createTreeTable("tree_bug_rebalance_sync")
+        await table.inited
+
+        // 1. 创建父目录
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
+
+        // 2. 使用 setNodes 以保留自定义 index
+        await table.setNodes([
+            { id: "file1", name: "file1", isDir: false, index: "a", parentId: "dir" },
+            { id: "file2", name: "file2", isDir: false, index: "ab", parentId: "dir" },
+        ])
+
+        const file1Init = await table.get("file1")
+        const file2Init = await table.get("file2")
+        const dirInit = await table.get("dir")
+
+        // 稍作延迟
+        await new Promise((resolve) => setTimeout(resolve, 5))
+
+        // 3. 直接调用重排函数，设置较小的 maxIndexLength 以强制触发重排
+        await rebalanceTreeIndexes(table, "dir", [
+            { id: "file1", index: "a" },
+            { id: "file2", index: "ab" },
+        ], { maxIndexLength: 1 })
+
+        const file1After = await table.get("file1")
+        const file2After = await table.get("file2")
+        const dirAfter = await table.get("dir")
+
+        // 验证重排确实发生（index 应该被缩短或重写）
+        expect(file2After?.index).not.toBe("ab")
+
+        // 验证受影响子节点的 modif 被更新
+        expect(file2After?.modif).toBeGreaterThan(file2Init!.modif)
+
+        // 验证父目录的 cmodif 被更新
+        expect(dirAfter?.cmodif).toBeGreaterThan(dirInit!.cmodif ?? 0)
+    })
+
+    test("preOverwriteNodes 进行冲突预检时，应该过滤掉待移动的节点自身，不报告自己与自己的冲突", async () => {
+        const table = createTreeTable("tree_bug_pre_overwrite_self")
+        await table.inited
+
+        // 1. 创建一个父目录和文件
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
+        await table.createNodes([{ id: "file1", name: "file1.txt", isDir: false }], "dir")
+
+        // 2. 检查将 file1 移动到同级时（即仍然在 dir 下），按 name 预检不应报告冲突
+        const checkResult = await table.preOverwriteNodes(
+            [],
+            ["file1"],
+            "dir",
+            { uniqueBy: "name" },
+        )
+
+        // 因为移动的就是自己，且没有其他同名节点，所以不应该有冲突
+        expect(checkResult.isConflict).toBe(false)
+        expect(checkResult.existNodes).toEqual([])
+    })
+
+    test("createNodes 创建节点时应该保留传入节点对象上自带的 index，而不应直接将其覆盖丢弃", async () => {
+        const table = createTreeTable("tree_bug_create_nodes_keeps_index")
+        await table.inited
+
+        // 创建时显式传入自定义的 index
+        await table.createNodes([
+            { id: "file1", name: "file1", isDir: false, index: "custom-idx" },
+        ], "/")
+
+        const node = await table.get("file1")
+        // 应保留用户传入的排序索引
+        expect(node?.index).toBe("custom-idx")
     })
 })

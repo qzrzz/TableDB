@@ -43,7 +43,6 @@ export async function createNodes(
     await assertTreeParentExists(this, parentId)
 
     const modif = Date.now()
-    const indexes = await resolveTreeIndexes(this, parentId, nodes.length, options?.index)
     const newNodes = nodes.map((node, index) => {
         return normalizeWritableNode(node, {
             parentId,
@@ -51,8 +50,19 @@ export async function createNodes(
         }) as ITreeNode
     })
 
-    for (let i = 0; i < newNodes.length; i++) {
-        newNodes[i].index = indexes[i]
+    if (options?.index) {
+        const indexes = await resolveTreeIndexes(this, parentId, newNodes.length, options.index)
+        for (let i = 0; i < newNodes.length; i++) {
+            newNodes[i].index = indexes[i]
+        }
+    } else {
+        const nodesNeedIndex = newNodes.filter((node) => !node.index)
+        if (nodesNeedIndex.length > 0) {
+            const indexes = await resolveTreeIndexes(this, parentId, nodesNeedIndex.length)
+            for (let i = 0; i < nodesNeedIndex.length; i++) {
+                nodesNeedIndex[i].index = indexes[i]
+            }
+        }
     }
 
     const result = await this.insertMany(newNodes)

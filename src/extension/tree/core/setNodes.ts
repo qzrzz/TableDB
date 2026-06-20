@@ -116,6 +116,7 @@ export async function setNodes(
     return result
 }
 
+/** 收集 setNodes 需要返回的预同步结果，避免把 oldModif/oldCmodif 写入真实节点数据。 */
 async function collectSetPresyncResult(
     this: TableTree<ITreeNode>,
     nodes: Partial<ITreeNode>[],
@@ -133,6 +134,7 @@ async function collectSetPresyncResult(
     return this.presyncNodes(presyncNodes)
 }
 
+/** 将外部传入的节点补齐为可写入节点，并统一写入本次操作的 modif。 */
 function prepareWritableNodes(nodes: Partial<ITreeNode>[], modif: number): ITreeNode[] {
     return nodes.map((node) => {
         const { oldModif, oldCmodif, ...nodeData } = node as any
@@ -140,6 +142,11 @@ function prepareWritableNodes(nodes: Partial<ITreeNode>[], modif: number): ITree
     })
 }
 
+/**
+ * 校验本次写入涉及的父节点是否存在。
+ *
+ * 同一批次内新建父子节点时，父节点可能尚未落库，因此允许 parentId 指向本批次内的节点。
+ */
 async function assertSetNodeParents(
     this: TableTree<ITreeNode>,
     writableNodes: ITreeNode[],
@@ -154,6 +161,11 @@ async function assertSetNodeParents(
     }
 }
 
+/**
+ * 为待写入节点确定排序索引。
+ *
+ * 普通更新会尽量保留原 index；新建、跨父级写入或显式指定 index 选项时才重新分配。
+ */
 async function applySetNodeIndexes(
     this: TableTree<ITreeNode>,
     nodesByParentId: Map<string, ITreeNode[]>,
@@ -192,6 +204,11 @@ async function applySetNodeIndexes(
     }
 }
 
+/**
+ * 应用覆盖策略，解析最终需要写入的节点和已经删除的冲突节点。
+ *
+ * merge/mergeByModif 会把来源目录的子节点重新挂到目标目录下，并逐层继续解析子级冲突。
+ */
 async function applySetOverwrite(
     this: TableTree<ITreeNode>,
     nodes: ITreeNode[],
@@ -250,6 +267,7 @@ async function applySetOverwrite(
     }
 }
 
+/** 计算需要返回给调用方的变更节点 ID，updateOnly 模式下只返回实际已存在并会被更新的节点。 */
 async function collectWritableChangedNodeIds(
     this: TableTree<ITreeNode>,
     writableNodes: ITreeNode[],
@@ -269,6 +287,7 @@ async function collectWritableChangedNodeIds(
     return changedNodeIds
 }
 
+/** 将树节点的 setMode 选项转换为底层 Table.setMany() 可识别的写入选项。 */
 function resolveSetManyOptions(options?: ITreeSetNodesOptions) {
     return {
         updateOnly: options?.updateOnly,
@@ -277,6 +296,11 @@ function resolveSetManyOptions(options?: ITreeSetNodesOptions) {
     }
 }
 
+/**
+ * 将 replace 覆盖冲突转换为实际写入计划。
+ *
+ * 为了让覆盖后的节点继续使用目标节点 ID，会把来源节点内容映射到第一个冲突目标上。
+ */
 function resolveTargetSetNodes(
     resolved: IResolveOverwriteNodesResult<ITreeNode>,
 ): { nodes: ITreeNode[]; deleteNodeIds: string[] } {
@@ -320,6 +344,7 @@ function resolveTargetSetNodes(
     }
 }
 
+/** 生成 replace 冲突场景下的目标节点更新数据，保留目标节点的身份和树位置。 */
 function resolveConflictTargetUpdate(sourceNode: ITreeNode, targetNode: ITreeNode): ITreeNode {
     return {
         ...sourceNode,
@@ -330,6 +355,7 @@ function resolveConflictTargetUpdate(sourceNode: ITreeNode, targetNode: ITreeNod
     }
 }
 
+/** 按 parentId 分组节点，便于覆盖策略、父级校验和索引计算按同级节点批量处理。 */
 function groupNodesByParentId(nodes: ITreeNode[]): Map<string, ITreeNode[]> {
     const nodesByParentId = new Map<string, ITreeNode[]>()
     for (const node of nodes) {
@@ -340,6 +366,7 @@ function groupNodesByParentId(nodes: ITreeNode[]): Map<string, ITreeNode[]> {
     return nodesByParentId
 }
 
+/** 生成 merge 冲突场景下的目标目录更新数据，mergeByModif 会保留更新的目标目录字段。 */
 function resolveMergeTargetUpdate(
     sourceNode: ITreeNode,
     targetNode: ITreeNode,
@@ -358,6 +385,7 @@ function resolveMergeTargetUpdate(
     }
 }
 
+/** 收集写入前节点所在的旧父级，用于节点移动后刷新旧父级及其祖先的统计信息。 */
 async function collectExistingParentIds(this: TableTree<ITreeNode>, nodes: ITreeNode[]): Promise<string[]> {
     const parentIds = new Set<string>()
     for (const node of nodes) {
