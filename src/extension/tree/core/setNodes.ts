@@ -114,7 +114,6 @@ export async function setNodes(
     }
     await refreshTreeMetadata(this, {
         parentIds: [...Array.from(nodesByParentId.keys()), ...oldParentIds],
-        nodeIds: resolvedNodes.map((node) => node.id),
         cmodif: modif,
     })
     if (options?.overwriteMode === "newName" && (options.uniqueBy ?? "id") === "name") {

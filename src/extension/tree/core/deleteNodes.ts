@@ -1,7 +1,7 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
 import { collectDescendantNodes } from "../util/collectDescendantNodes"
-import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
+import { applyTreeMetadataDelta, calcTreeNodeContribution } from "../util/applyTreeMetadataDelta"
 
 /** 删除节点选项 */
 export interface ITreeDeleteNodesOptions {
@@ -46,7 +46,7 @@ export async function deleteNodes(
     }
 
     const deleteIds = nodes.map((node) => node.id)
-    const parentIds = Array.from(new Set(nodes.map((node) => node.parentId)))
+    const topDeletedNodes = collectTopDeletedNodes(nodes)
     const modif = Date.now()
 
     const shouldRealDelete = options?.realDelete === true || this.options?.enableMarkDelete !== true
@@ -65,14 +65,26 @@ export async function deleteNodes(
         )
     }
 
-    await refreshTreeMetadata(this, {
-        parentIds,
-        cmodif: modif,
-    })
+    await applyTreeMetadataDelta(this, topDeletedNodes.map((node) => {
+        const contribution = calcTreeNodeContribution(node)
+        return {
+            parentId: node.parentId,
+            ctotal: -contribution.ctotal,
+            cftotal: -contribution.cftotal,
+            csize: -contribution.csize,
+            refreshChildLastIndex: true,
+        }
+    }), modif)
 
     return {
         hasDeleted: true,
         hasChildDeleted: nodes.some((node) => !uniqueNodeIds.includes(node.id)),
         deletedCount: nodes.length,
     }
+}
+
+/** 删除父子混合输入时，只用最外层被删除节点计算对可见树的贡献变化，避免后代重复扣减。 */
+function collectTopDeletedNodes(nodes: ITreeNode[]): ITreeNode[] {
+    const deletedNodeIds = new Set(nodes.map((node) => node.id))
+    return nodes.filter((node) => node._isDeleted !== true && !deletedNodeIds.has(node.parentId))
 }

@@ -3,6 +3,7 @@ import type { TableTree } from "../TableTree"
 import type { ITreeChangeResult, ITreeNode } from "../tree.types"
 import { collectDescendantNodes } from "../util/collectDescendantNodes"
 import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
+import { applyTreeMetadataDelta, calcTreeNodeContribution, type ITreeMetadataStatsDelta } from "../util/applyTreeMetadataDelta"
 import { isTreeManagedField } from "../util/stripTreeManagedFields"
 import { assertNotMoveIntoSelfOrDescendant, assertTreeNodeName, assertTreeParentExists } from "../util/assertTreeParent"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
@@ -30,7 +31,13 @@ export async function updateNodes(
     updateOp: ITableUpdateOp<ITreeNode>,
     options?: ITreeUpdateNodesOptions,
 ): Promise<ITreeChangeResult> {
-    const targetNodes = await this.findMany(filter)
+    const statsChanged = isTreeStatsAffectedUpdateOp(updateOp)
+    const canApplyIncrementalMetadata = statsChanged && canApplyIncrementalUpdateMetadata(updateOp)
+    const targetNodes = await this.findMany(filter, {
+        projection: canApplyIncrementalMetadata
+            ? ["id", "parentId", "index", "isDir", "size", "ctotal", "cftotal", "csize"]
+            : ["id", "parentId"],
+    })
     if (targetNodes.length === 0) {
         return {}
     }
@@ -50,15 +57,78 @@ export async function updateNodes(
     const cleanUpdateOp = normalizeTreeUpdateOp(updateOp, newModif)
 
     await applyUpdateNodes.call(this, allNodes, updateNodeIds, cleanUpdateOp, updateOp)
-    await refreshTreeMetadata(this, {
-        parentIds,
-        nodeIds: updateNodeIds,
-        cmodif: newModif,
-    })
+    const setOp = updateOp.$set as Record<string, any> | undefined
+    if (canApplyIncrementalMetadata) {
+        await applyUpdateMetadataDelta(this, allNodes, setOp, newModif)
+    } else {
+        await refreshTreeMetadata(this, {
+            parentIds,
+            nodeIds: setOp?.parentId !== undefined ? updateNodeIds : undefined,
+            cmodif: newModif,
+            statsChanged,
+        })
+    }
 
     return {
         modif: newModif,
         cmodif: newModif,
+    }
+}
+
+async function applyUpdateMetadataDelta(
+    table: TableTree<ITreeNode>,
+    oldNodes: ITreeNode[],
+    setOp: Record<string, any> | undefined,
+    cmodif: number,
+): Promise<void> {
+    const deltas: ITreeMetadataStatsDelta[] = []
+    for (const oldNode of oldNodes) {
+        const nextNode = resolveUpdatedStatsNode(oldNode, setOp)
+        const oldContribution = calcTreeNodeContribution(oldNode)
+        const nextContribution = calcTreeNodeContribution(nextNode)
+        const parentChanged = oldNode.parentId !== nextNode.parentId
+        const indexChanged = setOp && Object.prototype.hasOwnProperty.call(setOp, "index")
+
+        if (parentChanged) {
+            deltas.push({
+                parentId: oldNode.parentId,
+                ctotal: -oldContribution.ctotal,
+                cftotal: -oldContribution.cftotal,
+                csize: -oldContribution.csize,
+                refreshChildLastIndex: true,
+            })
+            deltas.push({
+                parentId: nextNode.parentId,
+                ...nextContribution,
+                refreshChildLastIndex: true,
+            })
+            continue
+        }
+
+        const delta = {
+            ctotal: nextContribution.ctotal - oldContribution.ctotal,
+            cftotal: nextContribution.cftotal - oldContribution.cftotal,
+            csize: nextContribution.csize - oldContribution.csize,
+        }
+        deltas.push({
+            parentId: oldNode.parentId,
+            ...delta,
+            refreshChildLastIndex: Boolean(indexChanged),
+        })
+    }
+
+    await applyTreeMetadataDelta(table, deltas, cmodif)
+}
+
+function resolveUpdatedStatsNode(node: ITreeNode, setOp: Record<string, any> | undefined): ITreeNode {
+    if (!setOp) return node
+
+    return {
+        ...node,
+        parentId: setOp.parentId ?? node.parentId,
+        index: setOp.index ?? node.index,
+        isDir: setOp.isDir ?? node.isDir,
+        size: setOp.size ?? node.size,
     }
 }
 
@@ -224,6 +294,63 @@ function cloneUpdateOp(updateOp: ITableUpdateOp<ITreeNode>): ITableUpdateOp<ITre
         $set: updateOp.$set ? { ...(updateOp.$set as any) } : undefined,
         $unset: Array.isArray(updateOp.$unset) ? [...updateOp.$unset] as any : updateOp.$unset ? { ...(updateOp.$unset as any) } : undefined,
     }
+}
+
+/** 判断本次更新是否会改变目录统计；普通内容字段变化只需要刷新祖先 cmodif。 */
+function isTreeStatsAffectedUpdateOp(updateOp: ITableUpdateOp<ITreeNode>): boolean {
+    const statsFields = new Set(["parentId", "index", "isDir", "size"])
+    const hasStatsField = (op: Record<string, any> | undefined): boolean => {
+        return Boolean(op && Object.keys(op).some((key) => statsFields.has(key)))
+    }
+
+    if (hasStatsField(updateOp.$set as Record<string, any> | undefined)) return true
+    if (hasUnsetStatsField(updateOp.$unset, statsFields)) return true
+    if (hasStatsField(updateOp.$inc as Record<string, any> | undefined)) return true
+    if (hasStatsField(updateOp.$mul as Record<string, any> | undefined)) return true
+    if (hasStatsField(updateOp.$min as Record<string, any> | undefined)) return true
+    if (hasStatsField(updateOp.$max as Record<string, any> | undefined)) return true
+
+    const renameOp = updateOp.$rename as Record<string, string> | undefined
+    if (renameOp) {
+        return Object.entries(renameOp).some(([fromKey, toKey]) => statsFields.has(fromKey) || statsFields.has(toKey))
+    }
+    return false
+}
+
+/** 只有能从旧节点和 $set 直接推导新贡献值的结构更新，才走 O(depth) 增量维护。 */
+function canApplyIncrementalUpdateMetadata(updateOp: ITableUpdateOp<ITreeNode>): boolean {
+    const statsFields = new Set(["parentId", "index", "isDir", "size"])
+    const setOp = updateOp.$set as Record<string, any> | undefined
+    const hasStatsField = (op: Record<string, any> | undefined): boolean => {
+        return Boolean(op && Object.keys(op).some((key) => statsFields.has(key)))
+    }
+
+    if (hasUnsetStatsField(updateOp.$unset, statsFields)) return false
+    if (hasStatsField(updateOp.$inc as Record<string, any> | undefined)) return false
+    if (hasStatsField(updateOp.$mul as Record<string, any> | undefined)) return false
+    if (hasStatsField(updateOp.$min as Record<string, any> | undefined)) return false
+    if (hasStatsField(updateOp.$max as Record<string, any> | undefined)) return false
+
+    const renameOp = updateOp.$rename as Record<string, string> | undefined
+    if (renameOp && Object.entries(renameOp).some(([fromKey, toKey]) => statsFields.has(fromKey) || statsFields.has(toKey))) {
+        return false
+    }
+
+    // parentId 移动在多用户并发下可能基于过期父级做重复加减，先保留全量刷新兜底保证收敛正确。
+    if (setOp && Object.prototype.hasOwnProperty.call(setOp, "parentId")) {
+        return false
+    }
+
+    return hasStatsField(setOp)
+}
+
+function hasUnsetStatsField(
+    unsetOp: ITableUpdateOp<ITreeNode>["$unset"],
+    statsFields: Set<string>,
+): boolean {
+    if (!unsetOp) return false
+    const unsetKeys = Array.isArray(unsetOp) ? unsetOp.map(String) : Object.keys(unsetOp)
+    return unsetKeys.some((key) => statsFields.has(key))
 }
 
 function normalizeTreeUpdateOp(updateOp: ITableUpdateOp<ITreeNode>, modif: number): ITableUpdateOp<ITreeNode> {

@@ -9,6 +9,8 @@ export interface IRefreshTreeMetadataOptions {
     nodeIds?: string[]
     /** 本次操作的子树修改计数。 */
     cmodif?: number
+    /** 是否需要重新统计子级数量、文件数、大小和末尾 index；普通内容更新只需要推进 cmodif。 */
+    statsChanged?: boolean
 }
 
 interface ITreeStats {
@@ -25,12 +27,22 @@ export async function refreshTreeMetadata<TNode extends ITreeNode>(
 ): Promise<void> {
     const refreshIds = new Set<string>()
     const cmodifNodeIds = new Set<string>()
+    const ancestorIdsCache = new Map<string, string[]>()
+    const collectCachedAncestorIds = async (nodeId: string | undefined) => {
+        if (!nodeId || nodeId === "/") return []
+        const cachedIds = ancestorIdsCache.get(nodeId)
+        if (cachedIds) return cachedIds
+
+        const ancestorIds = await collectAncestorIds(table, nodeId)
+        ancestorIdsCache.set(nodeId, ancestorIds)
+        return ancestorIds
+    }
 
     for (const parentId of options.parentIds ?? []) {
         if (parentId && parentId !== "/") {
             refreshIds.add(parentId)
             cmodifNodeIds.add(parentId)
-            for (const ancestorId of await collectAncestorIds(table, parentId)) {
+            for (const ancestorId of await collectCachedAncestorIds(parentId)) {
                 refreshIds.add(ancestorId)
                 cmodifNodeIds.add(ancestorId)
             }
@@ -40,44 +52,91 @@ export async function refreshTreeMetadata<TNode extends ITreeNode>(
     for (const nodeId of options.nodeIds ?? []) {
         const node = await table.get(nodeId, { ignoreMarkDelete: true })
         if (!node) continue
-        refreshIds.add(node.id)
+        // 节点自身的统计只由它的子级决定；当前节点被写入时，只需要刷新它的父级和祖先。
         if (node.parentId && node.parentId !== "/") {
             refreshIds.add(node.parentId)
             cmodifNodeIds.add(node.parentId)
-            for (const ancestorId of await collectAncestorIds(table, node.parentId)) {
+            for (const ancestorId of await collectCachedAncestorIds(node.parentId)) {
                 refreshIds.add(ancestorId)
                 cmodifNodeIds.add(ancestorId)
             }
         }
     }
 
-    const orderedIds = await sortRefreshIdsByDepth(table, Array.from(refreshIds))
-    for (const nodeId of orderedIds) {
-        await refreshOneNode(table, nodeId, cmodifNodeIds.has(nodeId) ? options.cmodif : undefined)
+    if (options.statsChanged === false) {
+        await refreshCmodifOnly(table, Array.from(cmodifNodeIds), options.cmodif)
+        return
+    }
+
+    const refreshLevels = await groupRefreshIdsByDepth(table, Array.from(refreshIds), collectCachedAncestorIds)
+    for (const levelIds of refreshLevels) {
+        const updates: Parameters<TableTree<TNode>["bulkUpdate"]>[0] = []
+        for (const nodeId of levelIds) {
+            const updateOp = await calcRefreshNodeUpdateOp(table, nodeId, cmodifNodeIds.has(nodeId) ? options.cmodif : undefined)
+            if (updateOp) {
+                updates.push({
+                    filter: { id: nodeId },
+                    updateOp,
+                })
+            }
+        }
+        if (updates.length > 0) {
+            // 同深度目录互不依赖，可以批量提交；不同深度仍逐层向上刷新，保证父级读到最新子级统计。
+            await table.bulkUpdate(updates)
+        }
     }
 }
 
-async function sortRefreshIdsByDepth<TNode extends ITreeNode>(
+async function refreshCmodifOnly<TNode extends ITreeNode>(
     table: TableTree<TNode>,
     nodeIds: string[],
-): Promise<string[]> {
-    const depthByNodeId = new Map<string, number>()
-    for (const nodeId of nodeIds) {
-        depthByNodeId.set(nodeId, (await collectAncestorIds(table, nodeId)).length)
-    }
+    cmodif: number | undefined,
+): Promise<void> {
+    if (cmodif === undefined || nodeIds.length === 0) return
 
-    return nodeIds.sort((left, right) => {
-        return (depthByNodeId.get(right) ?? 0) - (depthByNodeId.get(left) ?? 0)
-    })
+    // 普通内容更新不会改变目录统计，直接推进可见祖先的 cmodif，避免重复扫描所有兄弟节点。
+    await table.bulkUpdate(nodeIds.map((nodeId) => ({
+        filter: { id: nodeId, _isDeleted: { $ne: true } } as any,
+        updateOp: { $set: { cmodif } as any },
+    })))
 }
 
-async function refreshOneNode<TNode extends ITreeNode>(
+async function groupRefreshIdsByDepth<TNode extends ITreeNode>(
+    table: TableTree<TNode>,
+    nodeIds: string[],
+    collectCachedAncestorIds?: (nodeId: string | undefined) => Promise<string[]>,
+): Promise<string[][]> {
+    const depthByNodeId = new Map<string, number>()
+    for (const nodeId of nodeIds) {
+        const ancestorIds = collectCachedAncestorIds
+            ? await collectCachedAncestorIds(nodeId)
+            : await collectAncestorIds(table, nodeId)
+        depthByNodeId.set(nodeId, ancestorIds.length)
+    }
+
+    const orderedIds = nodeIds.sort((left, right) => {
+        return (depthByNodeId.get(right) ?? 0) - (depthByNodeId.get(left) ?? 0)
+    })
+    const groups: string[][] = []
+    let currentDepth: number | undefined
+    for (const nodeId of orderedIds) {
+        const depth = depthByNodeId.get(nodeId) ?? 0
+        if (currentDepth !== depth) {
+            groups.push([])
+            currentDepth = depth
+        }
+        groups[groups.length - 1].push(nodeId)
+    }
+    return groups
+}
+
+async function calcRefreshNodeUpdateOp<TNode extends ITreeNode>(
     table: TableTree<TNode>,
     nodeId: string,
     cmodif?: number,
-): Promise<void> {
+): Promise<Parameters<TableTree<TNode>["bulkUpdate"]>[0][number]["updateOp"] | undefined> {
     const node = await table.get(nodeId, { ignoreMarkDelete: true })
-    if (!node || node._isDeleted === true) return
+    if (!node || node._isDeleted === true) return undefined
 
     const stats = await calcChildrenStats(table, nodeId)
     const $set: Record<string, any> = {}
@@ -106,7 +165,7 @@ async function refreshOneNode<TNode extends ITreeNode>(
         $set.modif = cmodif ?? Date.now()
     }
 
-    await table.updateOne({ id: nodeId }, { $set: $set as any, $unset })
+    return { $set: $set as any, $unset }
 }
 
 function setNumberStat(
@@ -130,7 +189,10 @@ async function calcChildrenStats<TNode extends ITreeNode>(
     table: TableTree<TNode>,
     parentId: string,
 ): Promise<ITreeStats> {
-    const children = await table.findMany({ parentId }, { sort: { index: 1 } }) as TNode[]
+    const children = await table.findMany(
+        { parentId },
+        { projection: ["id", "index", "isDir", "size", "ctotal", "cftotal", "csize"] },
+    ) as TNode[]
     const stats: ITreeStats = {
         ctotal: 0,
         cftotal: 0,

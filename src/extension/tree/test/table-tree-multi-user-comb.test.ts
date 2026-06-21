@@ -156,6 +156,21 @@ async function expectAllVisibleTreeStateAccurate(table: TableTree<ITestTreeNode>
     }
 }
 
+async function expectNoParentCycles(table: TableTree<ITestTreeNode>) {
+    const nodes = await table.findMany({}) as ITestTreeNode[]
+    const nodeById = new Map(nodes.map((node) => [node.id, node]))
+
+    for (const node of nodes) {
+        const visitedIds = new Set<string>([node.id])
+        let parentId = node.parentId
+        while (parentId && parentId !== "/") {
+            expect(visitedIds.has(parentId)).toBe(false)
+            visitedIds.add(parentId)
+            parentId = nodeById.get(parentId)?.parentId ?? "/"
+        }
+    }
+}
+
 describe("TableTree 多用户连续操作组合", () => {
     test("多个用户实例连接同一目录树时应看到一致的操作结果和 metadata", async () => {
         const [alice, bob, chen] = await createMultiUserTables("shared-visibility")
@@ -821,6 +836,47 @@ describe("TableTree 多用户连续操作组合", () => {
         await expectAllVisibleTreeStateAccurate(chen)
     })
 
+    test("多个用户同时 mergeByModif 到空目标目录时同名子文件应保留较新版本", async () => {
+        const [alice, bob, chen] = await createMultiUserTables("parallel-merge-by-modif-empty-target")
+        await alice.setNodes(
+            [
+                { id: "target", parentId: "/", name: "target", isDir: true },
+                { id: "a", parentId: "/", name: "a", isDir: true },
+                { id: "b", parentId: "/", name: "b", isDir: true },
+                { id: "c", parentId: "/", name: "c", isDir: true },
+                { id: "pkg-a", parentId: "a", name: "pkg", isDir: true },
+                { id: "file-a", parentId: "pkg-a", name: "common.ts", isDir: false, size: 2 },
+                { id: "only-a", parentId: "pkg-a", name: "a.ts", isDir: false, size: 20 },
+                { id: "pkg-b", parentId: "b", name: "pkg", isDir: true },
+                { id: "file-b", parentId: "pkg-b", name: "common.ts", isDir: false, size: 3 },
+                { id: "only-b", parentId: "pkg-b", name: "b.ts", isDir: false, size: 30 },
+                { id: "pkg-c", parentId: "c", name: "pkg", isDir: true },
+                { id: "file-c", parentId: "pkg-c", name: "common.ts", isDir: false, size: 4 },
+                { id: "only-c", parentId: "pkg-c", name: "c.ts", isDir: false, size: 40 },
+            ],
+            { index: { toEnd: true } },
+        )
+        await alice.updateNodes({ id: "file-a" }, { $set: { modif: 100 } })
+        await bob.updateNodes({ id: "file-b" }, { $set: { modif: 300 } })
+        await chen.updateNodes({ id: "file-c" }, { $set: { modif: 200 } })
+
+        await Promise.all([
+            alice.moveNodes(["pkg-a"], "target", { uniqueBy: "name", overwriteMode: "mergeByModif", index: { toEnd: true } }),
+            bob.moveNodes(["pkg-b"], "target", { uniqueBy: "name", overwriteMode: "mergeByModif", index: { toEnd: true } }),
+            chen.moveNodes(["pkg-c"], "target", { uniqueBy: "name", overwriteMode: "mergeByModif", index: { toEnd: true } }),
+        ])
+
+        const pkgNodes = await alice.findMany({ parentId: "target", name: "pkg" })
+        expect(pkgNodes).toHaveLength(1)
+        const commonFiles = await alice.findMany({ parentId: pkgNodes[0].id, name: "common.ts" })
+        expect(commonFiles).toHaveLength(1)
+        expect(commonFiles[0].size).toBe(3)
+        expect((await listChildNames(alice, pkgNodes[0].id)).sort()).toEqual(["a.ts", "b.ts", "c.ts", "common.ts"])
+        await expectAllVisibleTreeStateAccurate(alice)
+        await expectAllVisibleTreeStateAccurate(bob)
+        await expectAllVisibleTreeStateAccurate(chen)
+    })
+
     test("多个用户同时用 updateNodes 移动节点到同一目录时目标目录 metadata 和 index 应正确", async () => {
         const [alice, bob, chen] = await createMultiUserTables("parallel-update-parent")
         await alice.setNodes(
@@ -846,5 +902,28 @@ describe("TableTree 多用户连续操作组合", () => {
         await expectAllVisibleTreeStateAccurate(alice)
         await expectAllVisibleTreeStateAccurate(bob)
         await expectAllVisibleTreeStateAccurate(chen)
+    })
+
+    test("多个用户同时把目录互相移动到对方下面时不应形成父级环", async () => {
+        const [alice, bob] = await createMultiUserTables("parallel-cross-move-cycle", 2)
+        await alice.setNodes(
+            [
+                { id: "left", parentId: "/", name: "left", isDir: true },
+                { id: "right", parentId: "/", name: "right", isDir: true },
+                { id: "left-file", parentId: "left", name: "left.ts", isDir: false, size: 1 },
+                { id: "right-file", parentId: "right", name: "right.ts", isDir: false, size: 1 },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await Promise.allSettled([
+            alice.moveNodes(["left"], "right", { index: { toEnd: true } }),
+            bob.moveNodes(["right"], "left", { index: { toEnd: true } }),
+        ])
+
+        await expectNoParentCycles(alice)
+        await expectAllVisibleTreeStateAccurate(alice)
+        await expectNoParentCycles(bob)
+        await expectAllVisibleTreeStateAccurate(bob)
     })
 })

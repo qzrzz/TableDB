@@ -1,10 +1,10 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode, ITreeIndexOptions } from "../tree.types"
 import { normalizeWritableNode } from "../util/normalizeWritableNode"
-import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
 import { rebalanceTreeIndexes } from "../util/rebalanceTreeIndexes"
 import { assertTreeParentExists } from "../util/assertTreeParent"
+import { applyTreeMetadataDelta, calcTreeNodeContribution } from "../util/applyTreeMetadataDelta"
 
 /** 创建节点选项 */
 export interface ITreeCreateNodesOptions {
@@ -68,12 +68,12 @@ export async function createNodes(
     const result = await this.insertMany(newNodes)
     const insertedNodeSet = new Set(result.insertedIds)
     const insertedNodes = collectInsertedNodes(newNodes, insertedNodeSet)
+    await applyTreeMetadataDelta(this, insertedNodes.map((node) => ({
+        parentId,
+        ...calcTreeNodeContribution(node),
+        childLastIndexCandidate: node.index,
+    })), modif)
     await rebalanceTreeIndexes(this, parentId, insertedNodes.map((node) => ({ id: node.id, index: node.index })))
-    await refreshTreeMetadata(this, {
-        parentIds: [parentId],
-        nodeIds: result.insertedIds,
-        cmodif: modif,
-    })
 
     return {
         createdNodeIds: result.insertedIds,

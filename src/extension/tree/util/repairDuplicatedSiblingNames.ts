@@ -48,7 +48,6 @@ export async function repairDuplicatedSiblingNames<TNode extends ITreeNode>(
     )
     await refreshTreeMetadata(table, {
         parentIds: [parentId],
-        nodeIds: updates.map((node) => node.id),
         cmodif: modif,
     })
 }

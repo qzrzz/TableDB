@@ -16,6 +16,8 @@
         "build": "rslib build",
         "dev": "rslib build --watch",
         "test": "vitest",
+        "bench:tree": "node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
+        "bench:tree:all": "TABLE_TREE_BENCH_ADAPTERS=sqlite,mongodb node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
         "docs:dev": "starmap --rebuild --port=4811",
         "docs:build": "starmap build"
     },
@@ -25,9 +27,11 @@
         "@types/better-sqlite3": "7.6.13",
         "@types/fs-extra": "11.0.4",
         "@types/node": "^22",
+        "chalk": "5.6.2",
         "fake-indexeddb": "6.2.5",
         "fs-extra": "11.3.3",
         "tinybench": "6.0.0",
+        "tsx": "4.22.4",
         "typescript": "^6.0.3"
     },
     "dependencies": {

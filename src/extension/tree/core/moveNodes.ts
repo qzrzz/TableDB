@@ -59,25 +59,26 @@ export async function moveNodes(
     }
 
     const indexes = await resolveTreeIndexes(this, parentId, movableNodes.length, options?.index)
+    // 多用户并发移动时，目标父级可能在前置校验后被其他用户移动到来源节点下面。
+    // 写入前按当前数据库状态再校验一次，避免形成父级环后才在 metadata 刷新阶段失败。
+    await assertNotMoveIntoSelfOrDescendant(this, movableNodes.map((node) => node.id), parentId)
     const modif = Date.now()
     const oldParentIds = Array.from(new Set(movableNodes.map((node) => node.parentId)))
-    for (let i = 0; i < movableNodes.length; i++) {
-        await this.updateNodes(
-            { id: movableNodes[i].id },
-            {
-                $set: {
-                    parentId,
-                    index: indexes[i],
-                    name: movableNodes[i].name,
-                    modif,
-                },
+    await this.bulkUpdate(movableNodes.map((node, index) => ({
+        filter: { id: node.id },
+        updateOp: {
+            $set: {
+                parentId,
+                index: indexes[index],
+                name: node.name,
+                modif,
             },
-        )
-    }
+        },
+    })))
+    await rollbackMoveIfCycleCreated.call(this, movableNodes, parentId, modif)
     await rebalanceTreeIndexes(this, parentId, movableNodes.map((node, index) => ({ id: node.id, index: indexes[index] })))
     await refreshTreeMetadata(this, {
         parentIds: [parentId, ...oldParentIds],
-        nodeIds: movableNodes.map((node) => node.id),
         cmodif: modif,
     })
     if (options?.overwriteMode === "newName" && (options.uniqueBy ?? "id") === "name") {
@@ -96,6 +97,35 @@ export async function moveNodes(
     return {
         modif,
         cmodif: modif,
+    }
+}
+
+async function rollbackMoveIfCycleCreated(
+    this: TableTree<ITreeNode>,
+    oldNodes: ITreeNode[],
+    parentId: string,
+    modif: number,
+): Promise<void> {
+    try {
+        await assertNotMoveIntoSelfOrDescendant(this, oldNodes.map((node) => node.id), parentId)
+    } catch (error) {
+        // 并发交叉移动可能在写入后才形成父级环；必须回滚本次移动，不能把坏状态留给后续 metadata 刷新。
+        await this.bulkUpdate(oldNodes.map((node) => ({
+            filter: { id: node.id },
+            updateOp: {
+                $set: {
+                    parentId: node.parentId,
+                    index: node.index,
+                    name: node.name,
+                    modif,
+                },
+            },
+        })))
+        await refreshTreeMetadata(this, {
+            parentIds: [parentId, ...oldNodes.map((node) => node.parentId)],
+            cmodif: modif,
+        })
+        throw error
     }
 }
 
