@@ -5,6 +5,8 @@ import { resolveOverwriteNodes } from "../util/resolveOverwriteNodes"
 import { rebalanceTreeIndexes } from "../util/rebalanceTreeIndexes"
 import { assertNotMoveIntoSelfOrDescendant, assertTreeParentExists } from "../util/assertTreeParent"
 import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
+import { repairDuplicatedSiblingNames } from "../util/repairDuplicatedSiblingNames"
+import { repairDuplicatedSiblingConflicts } from "../util/repairDuplicatedSiblingConflicts"
 
 /** 移动节点选项 */
 export interface ITreeMoveNodesOptions extends ITreeOverwriteOptions {
@@ -78,6 +80,18 @@ export async function moveNodes(
         nodeIds: movableNodes.map((node) => node.id),
         cmodif: modif,
     })
+    if (options?.overwriteMode === "newName" && (options.uniqueBy ?? "id") === "name") {
+        await repairDuplicatedSiblingNames(this, parentId, movableNodes.map((node) => node.id))
+    }
+    if (["replace", "skip", "merge", "mergeByModif"].includes(options?.overwriteMode ?? "replace")) {
+        await repairDuplicatedSiblingConflicts(
+            this,
+            parentId,
+            options?.uniqueBy ?? "id",
+            movableNodes.map((node) => node.id),
+            options?.overwriteMode ?? "replace",
+        )
+    }
 
     return {
         modif,

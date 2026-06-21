@@ -5,6 +5,7 @@ import { newNodeId } from "../util/newNodeId"
 import { normalizeWritableNode } from "../util/normalizeWritableNode"
 import { assertTreeParentExists } from "../util/assertTreeParent"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
+import { repairDuplicatedSiblingNames } from "../util/repairDuplicatedSiblingNames"
 
 /** 复制节点选项 */
 export type ITreeCopyNodesOptions = ITreeOverwriteOptions & {
@@ -71,6 +72,9 @@ export async function copyNodes(
 
     const { index, ...setOptions } = options ?? {}
     await this.setNodes(copyNodes, setOptions)
+    if (shouldRenameOnCopy) {
+        await repairDuplicatedSiblingNames(this, parentId, createdNodeIds)
+    }
     const existingRootIds: string[] = []
     for (const nodeId of createdNodeIds) {
         if (await this.has(nodeId)) {

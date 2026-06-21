@@ -3,21 +3,18 @@ import type { ITreeNode } from "../tree.types"
 import { refreshTreeMetadata as refreshTreeMetadataUtil } from "../util/refreshTreeMetadata"
 
 /**
- * 刷新树的元数据
- *
- * @param parentId 要刷新元数据的文件夹 ID，可以指定为 "/" 来刷新整个树的元数据
+ * 递归刷新树的元数据
+ * 从一个文件夹向下递归刷新 metadata 属性，保证 `ctotal`,`cftotal`,`csize` 正确
  */
 export async function refreshTreeMetadata(
     table: TableTree<ITreeNode>,
+    /** 要刷新元数据的文件夹 ID，可以指定为 "/" 来刷新整个树的元数据 */
     parentId: string,
 ): Promise<void> {
     await refreshChildrenFirst(table, parentId)
 }
 
-async function refreshChildrenFirst(
-    table: TableTree<ITreeNode>,
-    parentId: string,
-): Promise<void> {
+async function refreshChildrenFirst(table: TableTree<ITreeNode>, parentId: string): Promise<void> {
     const children = await table.findMany({ parentId }, { ignoreMarkDelete: true })
     for (const child of children) {
         await refreshChildrenFirst(table, child.id)

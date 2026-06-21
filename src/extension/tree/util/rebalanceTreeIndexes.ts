@@ -1,4 +1,4 @@
-import { smartRebalance } from "indexless"
+import { getIndexesBetween, smartRebalance } from "indexless"
 import type { TableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
 import { refreshTreeMetadata } from "./refreshTreeMetadata"
@@ -47,7 +47,48 @@ export async function rebalanceTreeIndexes<TNode extends ITreeNode>(
         },
     )
 
-    if (result.rebalanced) {
+    const duplicatedIndexesRebalanced = await rebalanceDuplicatedSiblingIndexes(table, parentId)
+
+    if (result.rebalanced || duplicatedIndexesRebalanced) {
         await refreshTreeMetadata(table, { parentIds: [parentId], cmodif: Date.now() })
     }
+}
+
+/** 多用户并发写入时可能基于同一个旧 childLastIndex 生成相同 index，这里兜底恢复同级排序唯一性。 */
+async function rebalanceDuplicatedSiblingIndexes<TNode extends ITreeNode>(
+    table: TableTree<TNode>,
+    parentId: string,
+): Promise<boolean> {
+    const siblings = (await table.findMany(
+        { parentId },
+        { sort: { index: 1 }, projection: ["id", "index", "modif"] },
+    ) as Pick<TNode, "id" | "index" | "modif">[]).filter((node) => Boolean(node.index))
+    const indexes = siblings.map((node) => node.index).filter((index): index is string => Boolean(index))
+    if (new Set(indexes).size === indexes.length) {
+        return false
+    }
+
+    const orderedSiblings = [...siblings].sort((left, right) => {
+        const byIndex = compareIndex(left.index ?? "", right.index ?? "")
+        if (byIndex !== 0) return byIndex
+        const byModif = (left.modif ?? 0) - (right.modif ?? 0)
+        if (byModif !== 0) return byModif
+        return compareIndex(String(left.id), String(right.id))
+    })
+    const nextIndexes = getIndexesBetween(null, null, orderedSiblings.length)
+    const modif = Date.now()
+    await table.bulkUpdate(
+        orderedSiblings.map((node, index) => ({
+            filter: { id: node.id },
+            updateOp: { $set: { index: nextIndexes[index], modif } as any },
+        })),
+    )
+
+    return true
+}
+
+function compareIndex(left: string, right: string): number {
+    if (left < right) return -1
+    if (left > right) return 1
+    return 0
 }

@@ -189,3 +189,7 @@ let useTree = new TableTree<ITreeNode>(table, {
 @import "../../src/extension/tree/core/presyncNodes.ts" @doc=presyncNodes
 
 ## 工具接口
+
+### 刷新树元数据 `refreshTreeMetadata`
+
+@import "../../src/extension/tree/tool/refreshTreeMetadata.ts" @doc=refreshTreeMetadata

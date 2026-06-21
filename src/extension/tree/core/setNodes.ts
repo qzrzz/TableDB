@@ -8,6 +8,8 @@ import { resolveOverwriteNodes, type IResolveOverwriteNodesResult } from "../uti
 import { rebalanceTreeIndexes } from "../util/rebalanceTreeIndexes"
 import { assertNotMoveIntoSelfOrDescendant, assertTreeParentExists } from "../util/assertTreeParent"
 import { collectDescendantNodes } from "../util/collectDescendantNodes"
+import { repairDuplicatedSiblingNames } from "../util/repairDuplicatedSiblingNames"
+import { repairDuplicatedSiblingConflicts } from "../util/repairDuplicatedSiblingConflicts"
 
 /** 设置节点选项 */
 export type ITreeSetNodesOptions = ITreeOverwriteOptions & {
@@ -115,6 +117,22 @@ export async function setNodes(
         nodeIds: resolvedNodes.map((node) => node.id),
         cmodif: modif,
     })
+    if (options?.overwriteMode === "newName" && (options.uniqueBy ?? "id") === "name") {
+        for (const [parentId, parentNodes] of nodesByParentId) {
+            await repairDuplicatedSiblingNames(this, parentId, parentNodes.map((node) => node.id))
+        }
+    }
+    if (["replace", "skip", "merge", "mergeByModif"].includes(options?.overwriteMode ?? "replace")) {
+        for (const [parentId, parentNodes] of nodesByParentId) {
+            await repairDuplicatedSiblingConflicts(
+                this,
+                parentId,
+                options?.uniqueBy ?? "id",
+                parentNodes.map((node) => node.id),
+                options?.overwriteMode ?? "replace",
+            )
+        }
+    }
 
     const result: ITreeSetNodesResult = {
         modif,
