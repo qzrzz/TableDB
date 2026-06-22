@@ -233,7 +233,7 @@ async function createDefaultTree(targetCount: number) {
     const baseFilePerSub = Math.floor(fileCount / (topDirCount * subDirPerTop))
     let remainFiles = fileCount % (topDirCount * subDirPerTop)
     let writtenCount = 0
-    const topBatchSize = 10
+    const topBatchSize = 100
 
     // 示例数据必须经过 TableTree 接口写入，让 TableTree 自己维护分数 index 和目录元数据。
     // setNodes 支持同批次父子节点；按多个顶层项目分批可把 2000+ 次 createNodes 降到 10 次左右。
