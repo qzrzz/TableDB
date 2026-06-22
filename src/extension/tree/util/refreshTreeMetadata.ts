@@ -7,6 +7,8 @@ export interface IRefreshTreeMetadataOptions {
     parentIds?: string[]
     /** 可能受影响的节点 ID，会读取其 parentId 后刷新祖先链。 */
     nodeIds?: string[]
+    /** 只需要重算自身统计的节点 ID，不会推进这些节点的 cmodif。 */
+    statIds?: string[]
     /** 本次操作的子树修改计数。 */
     cmodif?: number
     /** 是否需要重新统计子级数量、文件数、大小和末尾 index；普通内容更新只需要推进 cmodif。 */
@@ -60,6 +62,13 @@ export async function refreshTreeMetadata<TNode extends ITreeNode>(
                 refreshIds.add(ancestorId)
                 cmodifNodeIds.add(ancestorId)
             }
+        }
+    }
+
+    for (const nodeId of options.statIds ?? []) {
+        if (nodeId && nodeId !== "/") {
+            // 目录自身被覆盖写入时需要恢复 ctotal/csize 等统计字段，但这不代表它的子树发生了变化。
+            refreshIds.add(nodeId)
         }
     }
 

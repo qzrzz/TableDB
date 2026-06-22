@@ -270,6 +270,50 @@ describe("defineTableTree 创建的 TableTree updateNodes", () => {
         expect(dir?.csize).toBe(5)
     })
 
+    test("应忽略 $inc 等数值算子中外部修改树统计字段的请求", async () => {
+        const table = await createDefinedTreeTable("ignore-managed-number-ops")
+
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
+        await table.createNodes([{ id: "file", name: "file.txt", isDir: false, size: 5 }], "dir")
+
+        await table.updateNodes(
+            { id: "dir" },
+            {
+                $inc: { ctotal: 99, cftotal: 88, csize: 77 } as any,
+                $max: { childLastIndex: "ZZ" } as any,
+                $set: { tag: "updated" },
+            },
+        )
+
+        const dir = await table.get("dir")
+        expect(dir?.tag).toBe("updated")
+        expect(dir?.ctotal).toBe(1)
+        expect(dir?.cftotal).toBe(1)
+        expect(dir?.csize).toBe(5)
+        expect(dir?.childLastIndex).not.toBe("ZZ")
+    })
+
+    test("应忽略 $rename 中外部改写树统计字段的请求", async () => {
+        const table = await createDefinedTreeTable("ignore-managed-rename")
+
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true, tag: "source" }], "/")
+        await table.createNodes([{ id: "file", name: "file.txt", isDir: false, size: 5 }], "dir")
+
+        await table.updateNodes(
+            { id: "dir" },
+            {
+                $rename: { tag: "ctotal", csize: "oldCsize" } as any,
+            },
+        )
+
+        const dir = await table.get("dir")
+        expect(dir?.tag).toBe("source")
+        expect((dir as any).oldCsize).toBeUndefined()
+        expect(dir?.ctotal).toBe(1)
+        expect(dir?.cftotal).toBe(1)
+        expect(dir?.csize).toBe(5)
+    })
+
     test("应拒绝非法名称、不存在父级、自身父级和后代父级", async () => {
         const table = await createDefinedTreeTable("guard")
 

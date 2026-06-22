@@ -100,6 +100,489 @@ describe("TableTree setNodes", () => {
         expect(dir1?.csize).toBe(100)
     })
 
+    test("同一批次包含多个 parentId 时应能创建多棵独立子树并分别刷新 metadata", async () => {
+        const table = await createDefinedTreeTable("batch-multi-parent-forest")
+
+        await table.setNodes(
+            [
+                { id: "docs", name: "docs", isDir: true, parentId: "/" },
+                { id: "src", name: "src", isDir: true, parentId: "/" },
+                { id: "docs-guide", name: "guide.md", isDir: false, size: 3, parentId: "docs" },
+                { id: "docs-api", name: "api", isDir: true, parentId: "docs" },
+                { id: "docs-api-index", name: "index.md", isDir: false, size: 5, parentId: "docs-api" },
+                { id: "src-core", name: "core", isDir: true, parentId: "src" },
+                { id: "src-index", name: "index.ts", isDir: false, size: 7, parentId: "src-core" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        expect(await listChildIds(table, "/")).toEqual(["docs", "src"])
+        expect(await listChildIds(table, "docs")).toEqual(["docs-guide", "docs-api"])
+        expect(await listChildIds(table, "docs-api")).toEqual(["docs-api-index"])
+        expect(await listChildIds(table, "src")).toEqual(["src-core"])
+
+        const docs = await table.get("docs")
+        const src = await table.get("src")
+        expect(docs?.ctotal).toBe(3)
+        expect(docs?.cftotal).toBe(2)
+        expect(docs?.csize).toBe(8)
+        expect(src?.ctotal).toBe(2)
+        expect(src?.cftotal).toBe(1)
+        expect(src?.csize).toBe(7)
+    })
+
+    test("同一批次多个 parentId 即使子节点先于父节点传入也应按最终父级关系建树", async () => {
+        const table = await createDefinedTreeTable("batch-multi-parent-out-of-order")
+
+        await table.setNodes(
+            [
+                { id: "docs-guide", name: "guide.md", isDir: false, size: 3, parentId: "docs" },
+                { id: "src-index", name: "index.ts", isDir: false, size: 7, parentId: "src-core" },
+                { id: "docs-api-index", name: "index.md", isDir: false, size: 5, parentId: "docs-api" },
+                { id: "docs", name: "docs", isDir: true, parentId: "/" },
+                { id: "src-core", name: "core", isDir: true, parentId: "src" },
+                { id: "src", name: "src", isDir: true, parentId: "/" },
+                { id: "docs-api", name: "api", isDir: true, parentId: "docs" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        expect(await listChildIds(table, "/")).toEqual(["docs", "src"])
+        expect(await listChildIds(table, "docs")).toEqual(["docs-guide", "docs-api"])
+        expect(await listChildIds(table, "docs-api")).toEqual(["docs-api-index"])
+        expect(await listChildIds(table, "src")).toEqual(["src-core"])
+        expect(await listChildIds(table, "src-core")).toEqual(["src-index"])
+        expect((await table.get("docs"))?.ctotal).toBe(3)
+        expect((await table.get("docs"))?.csize).toBe(8)
+        expect((await table.get("src"))?.ctotal).toBe(2)
+        expect((await table.get("src"))?.csize).toBe(7)
+    })
+
+    test("同一批次多个 parentId 可混合使用库中已有父级和本批次新建父级", async () => {
+        const table = await createDefinedTreeTable("batch-mixed-existing-and-new-parents")
+
+        await table.createNodes(
+            [
+                { id: "workspace", name: "workspace", isDir: true },
+                { id: "archive", name: "archive", isDir: true },
+            ],
+            "/",
+        )
+
+        await table.setNodes(
+            [
+                { id: "workspace-readme", name: "README.md", isDir: false, size: 2, parentId: "workspace" },
+                { id: "archive-2026", name: "2026", isDir: true, parentId: "archive" },
+                { id: "archive-log", name: "log.txt", isDir: false, size: 4, parentId: "archive-2026" },
+                { id: "drafts", name: "drafts", isDir: true, parentId: "workspace" },
+                { id: "draft-note", name: "note.md", isDir: false, size: 6, parentId: "drafts" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        expect(await listChildIds(table, "workspace")).toEqual(["workspace-readme", "drafts"])
+        expect(await listChildIds(table, "archive")).toEqual(["archive-2026"])
+        expect((await table.get("workspace"))?.ctotal).toBe(3)
+        expect((await table.get("workspace"))?.csize).toBe(8)
+        expect((await table.get("archive"))?.ctotal).toBe(2)
+        expect((await table.get("archive"))?.csize).toBe(4)
+    })
+
+    test("同一批次多个 parentId 中只要有缺失父级就应整体失败且不写入其它合法子树", async () => {
+        const table = await createDefinedTreeTable("batch-multi-parent-missing-parent")
+
+        await table.createNodes([{ id: "valid-root", name: "valid", isDir: true }], "/")
+
+        await expect(
+            table.setNodes([
+                { id: "valid-file", name: "ok.txt", isDir: false, size: 1, parentId: "valid-root" },
+                { id: "missing-child", name: "bad.txt", isDir: false, size: 2, parentId: "missing-root" },
+                { id: "missing-grandchild", name: "bad-deep.txt", isDir: false, size: 3, parentId: "missing-child" },
+            ]),
+        ).rejects.toThrow("父节点不存在")
+
+        expect(await table.get("valid-file", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("missing-child", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("missing-grandchild", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("valid-root"))?.ctotal ?? 0).toBe(0)
+    })
+
+    test("同一批次多个 parentId 中存在深层循环时应整体失败且不写入无关合法节点", async () => {
+        const table = await createDefinedTreeTable("batch-multi-parent-deep-cycle")
+
+        await expect(
+            table.setNodes([
+                { id: "safe-dir", name: "safe", isDir: true, parentId: "/" },
+                { id: "safe-file", name: "safe.txt", isDir: false, size: 1, parentId: "safe-dir" },
+                { id: "cycle-a", name: "a", isDir: true, parentId: "cycle-c" },
+                { id: "cycle-b", name: "b", isDir: true, parentId: "cycle-a" },
+                { id: "cycle-c", name: "c", isDir: true, parentId: "cycle-b" },
+            ]),
+        ).rejects.toThrow("循环父级")
+
+        expect(await table.get("safe-dir", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("safe-file", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("cycle-a", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("cycle-b", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("cycle-c", { ignoreMarkDelete: true })).toBeUndefined()
+    })
+
+    test("同一批次多个 parentId 中任一分支节点名称非法时应整体失败且不写入其它合法分支", async () => {
+        const table = await createDefinedTreeTable("batch-multi-parent-invalid-name")
+
+        await table.setNodes([{ id: "valid-root", name: "valid", isDir: true, parentId: "/" }])
+
+        await expect(
+            table.setNodes([
+                { id: "valid-file", name: "ok.txt", isDir: false, size: 1, parentId: "valid-root" },
+                { id: "bad-dir", name: "bad/name", isDir: true, parentId: "/" },
+                { id: "bad-child", name: "child.txt", isDir: false, size: 2, parentId: "bad-dir" },
+            ]),
+        ).rejects.toThrow("节点名称不能包含")
+
+        expect(await table.get("valid-file", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("bad-dir", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("bad-child", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("valid-root"))?.ctotal ?? 0).toBe(0)
+    })
+
+    test("同一批次重复 ID 指向不同 parentId 时应拒绝写入并保持原树不变", async () => {
+        const table = await createDefinedTreeTable("batch-duplicate-id-different-parent")
+
+        await table.setNodes(
+            [
+                { id: "left", name: "left", isDir: true, parentId: "/" },
+                { id: "right", name: "right", isDir: true, parentId: "/" },
+                { id: "left-old", name: "old.txt", isDir: false, size: 1, parentId: "left" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await expect(
+            table.setNodes([
+                { id: "same-node", name: "same-left.txt", isDir: false, size: 2, parentId: "left" },
+                { id: "same-node", name: "same-right.txt", isDir: false, size: 3, parentId: "right" },
+                { id: "right-ok", name: "right-ok.txt", isDir: false, size: 4, parentId: "right" },
+            ]),
+        ).rejects.toThrow("重复节点 ID")
+
+        expect(await table.get("same-node", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("right-ok", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await listChildIds(table, "left")).toEqual(["left-old"])
+        expect(await listChildIds(table, "right")).toEqual([])
+        expect((await table.get("left"))?.ctotal).toBe(1)
+        expect((await table.get("right"))?.ctotal ?? 0).toBe(0)
+    })
+
+    test("同一批次重复 ID 即使指向同一 parentId 也应拒绝多个写入意图", async () => {
+        const table = await createDefinedTreeTable("batch-duplicate-id-same-parent")
+
+        await table.setNodes([{ id: "root", name: "root", isDir: true, parentId: "/" }])
+
+        await expect(
+            table.setNodes(
+                [
+                    { id: "same-node", name: "a.txt", isDir: false, size: 1, parentId: "root", tag: "a" },
+                    { id: "same-node", name: "b.txt", isDir: false, size: 2, parentId: "root", tag: "b" },
+                    { id: "other-node", name: "other.txt", isDir: false, size: 3, parentId: "root" },
+                ],
+                { uniqueBy: "name", overwriteMode: "replace" },
+            ),
+        ).rejects.toThrow("重复节点 ID")
+
+        expect(await table.get("same-node", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("other-node", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await listChildIds(table, "root")).toEqual([])
+        expect((await table.get("root"))?.ctotal ?? 0).toBe(0)
+    })
+
+    test("replace 覆盖把来源映射为目标 ID 后若与同批次显式更新冲突应整体拒绝", async () => {
+        const table = await createDefinedTreeTable("replace-resolved-duplicate-target-id")
+
+        await table.setNodes(
+            [
+                { id: "left", name: "left", isDir: true, parentId: "/" },
+                { id: "right", name: "right", isDir: true, parentId: "/" },
+                { id: "target", name: "same.txt", isDir: false, size: 1, parentId: "left", tag: "old" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await expect(
+            table.setNodes(
+                [
+                    { id: "incoming", name: "same.txt", isDir: false, size: 5, parentId: "left", tag: "replace" },
+                    { id: "target", name: "target-moved.txt", isDir: false, size: 7, parentId: "right", tag: "move" },
+                ],
+                { uniqueBy: "name", overwriteMode: "replace", index: { toEnd: true } },
+            ),
+        ).rejects.toThrow("重复节点 ID")
+
+        expect(await table.get("incoming", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("target"))?.parentId).toBe("left")
+        expect((await table.get("target"))?.name).toBe("same.txt")
+        expect((await table.get("target"))?.size).toBe(1)
+        expect((await table.get("target"))?.tag).toBe("old")
+        expect(await listChildIds(table, "left")).toEqual(["target"])
+        expect(await listChildIds(table, "right")).toEqual([])
+    })
+
+    test("merge 覆盖把来源合并到目标 ID 后若与同批次显式移动冲突应整体拒绝", async () => {
+        const table = await createDefinedTreeTable("merge-resolved-duplicate-target-id")
+
+        await table.setNodes(
+            [
+                { id: "left", name: "left", isDir: true, parentId: "/" },
+                { id: "right", name: "right", isDir: true, parentId: "/" },
+                { id: "target", name: "pkg", isDir: true, parentId: "left", tag: "old-target" },
+                { id: "old-file", name: "old.ts", isDir: false, size: 1, parentId: "target" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await expect(
+            table.setNodes(
+                [
+                    { id: "incoming", name: "pkg", isDir: true, parentId: "left", tag: "incoming" },
+                    { id: "incoming-file", name: "new.ts", isDir: false, size: 5, parentId: "incoming" },
+                    { id: "target", name: "pkg-moved", isDir: true, parentId: "right", tag: "move" },
+                ],
+                { uniqueBy: "name", overwriteMode: "merge", index: { toEnd: true } },
+            ),
+        ).rejects.toThrow("重复节点 ID")
+
+        expect(await table.get("incoming", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("incoming-file", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("target"))?.parentId).toBe("left")
+        expect((await table.get("target"))?.name).toBe("pkg")
+        expect((await table.get("target"))?.tag).toBe("old-target")
+        expect((await table.get("old-file"))?.parentId).toBe("target")
+        expect(await listChildIds(table, "left")).toEqual(["target"])
+        expect(await listChildIds(table, "right")).toEqual([])
+        expect((await table.get("target"))?.ctotal).toBe(1)
+        expect((await table.get("target"))?.csize).toBe(1)
+    })
+
+    test("同一批次移动多个已有节点到不同 parentId 时应刷新全部新旧父级 metadata", async () => {
+        const table = await createDefinedTreeTable("batch-move-multi-parent")
+
+        await table.setNodes(
+            [
+                { id: "left", name: "left", isDir: true, parentId: "/" },
+                { id: "right", name: "right", isDir: true, parentId: "/" },
+                { id: "archive", name: "archive", isDir: true, parentId: "/" },
+                { id: "left-file", name: "left.txt", isDir: false, size: 2, parentId: "left" },
+                { id: "right-file", name: "right.txt", isDir: false, size: 3, parentId: "right" },
+                { id: "archive-file", name: "archive.txt", isDir: false, size: 5, parentId: "archive" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "left-file", name: "left.txt", isDir: false, size: 2, parentId: "archive" },
+                { id: "right-file", name: "right.txt", isDir: false, size: 3, parentId: "left" },
+                { id: "archive-file", name: "archive.txt", isDir: false, size: 5, parentId: "right" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        expect(await listChildIds(table, "left")).toEqual(["right-file"])
+        expect(await listChildIds(table, "right")).toEqual(["archive-file"])
+        expect(await listChildIds(table, "archive")).toEqual(["left-file"])
+        expect((await table.get("left"))?.ctotal).toBe(1)
+        expect((await table.get("left"))?.csize).toBe(3)
+        expect((await table.get("right"))?.ctotal).toBe(1)
+        expect((await table.get("right"))?.csize).toBe(5)
+        expect((await table.get("archive"))?.ctotal).toBe(1)
+        expect((await table.get("archive"))?.csize).toBe(2)
+    })
+
+    test("同一批次移动已有父目录并把新节点写到移动后的父目录下时应保持整棵子树正确", async () => {
+        const table = await createDefinedTreeTable("batch-move-parent-and-create-child")
+
+        await table.setNodes(
+            [
+                { id: "workspace", name: "workspace", isDir: true, parentId: "/" },
+                { id: "archive", name: "archive", isDir: true, parentId: "/" },
+                { id: "pkg", name: "pkg", isDir: true, parentId: "workspace" },
+                { id: "old-file", name: "old.ts", isDir: false, size: 2, parentId: "pkg" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "pkg", name: "pkg", isDir: true, parentId: "archive" },
+                { id: "new-dir", name: "src", isDir: true, parentId: "pkg" },
+                { id: "new-file", name: "index.ts", isDir: false, size: 5, parentId: "new-dir" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        expect(await listChildIds(table, "workspace")).toEqual([])
+        expect(await listChildIds(table, "archive")).toEqual(["pkg"])
+        expect(await listChildIds(table, "pkg")).toEqual(["old-file", "new-dir"])
+        expect((await table.get("pkg"))?.parentId).toBe("archive")
+        expect((await table.get("new-file"))?.parentId).toBe("new-dir")
+        expect((await table.get("workspace"))?.ctotal ?? 0).toBe(0)
+        expect((await table.get("archive"))?.ctotal).toBe(4)
+        expect((await table.get("archive"))?.csize).toBe(7)
+        expect((await table.get("pkg"))?.ctotal).toBe(3)
+        expect((await table.get("pkg"))?.csize).toBe(7)
+    })
+
+    test("updateOnly 多 parentId 批次应先过滤缺失节点，不应因缺失节点的父级不存在而失败", async () => {
+        const table = await createDefinedTreeTable("update-only-multi-parent-filter-missing")
+
+        await table.setNodes(
+            [
+                { id: "left", name: "left", isDir: true, parentId: "/" },
+                { id: "right", name: "right", isDir: true, parentId: "/" },
+                { id: "left-file", name: "left.txt", isDir: false, size: 1, parentId: "left", tag: "old" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        const result = await table.setNodes(
+            [
+                { id: "left-file", name: "left-new.txt", isDir: false, size: 4, parentId: "right", tag: "moved" },
+                { id: "missing-file", name: "missing.txt", isDir: false, size: 8, parentId: "missing-parent" },
+            ],
+            { updateOnly: true, returnChangedNodesIds: true, index: { toEnd: true } },
+        )
+
+        expect(result.changedNodeIds).toEqual(["left-file"])
+        expect((await table.get("left-file"))?.parentId).toBe("right")
+        expect((await table.get("left-file"))?.tag).toBe("moved")
+        expect(await table.get("missing-file", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("left"))?.ctotal ?? 0).toBe(0)
+        expect((await table.get("right"))?.ctotal).toBe(1)
+        expect((await table.get("right"))?.csize).toBe(4)
+    })
+
+    test("updateOnly 多 parentId 批次应忽略重复 ID 的缺失节点而不是误判为非法树", async () => {
+        const table = await createDefinedTreeTable("update-only-ignore-missing-duplicate-id")
+
+        await table.setNodes(
+            [
+                { id: "left", name: "left", isDir: true, parentId: "/" },
+                { id: "right", name: "right", isDir: true, parentId: "/" },
+                { id: "exists", name: "exists.txt", isDir: false, size: 1, parentId: "left" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        const result = await table.setNodes(
+            [
+                { id: "missing-same", name: "missing-left.txt", isDir: false, size: 2, parentId: "left" },
+                { id: "missing-same", name: "missing-right.txt", isDir: false, size: 3, parentId: "right" },
+                { id: "exists", name: "exists-new.txt", isDir: false, size: 4, parentId: "right" },
+            ],
+            { updateOnly: true, returnChangedNodesIds: true },
+        )
+
+        expect(result.changedNodeIds).toEqual(["exists"])
+        expect(await table.get("missing-same", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("exists"))?.parentId).toBe("right")
+        expect((await table.get("exists"))?.name).toBe("exists-new.txt")
+        expect((await table.get("left"))?.ctotal ?? 0).toBe(0)
+        expect((await table.get("right"))?.ctotal).toBe(1)
+    })
+
+    test("同一批次移动已有目录到本批次新建的后代节点下应被拒绝且不写入新节点", async () => {
+        const table = await createDefinedTreeTable("batch-move-existing-dir-under-new-descendant")
+
+        await table.setNodes(
+            [
+                { id: "root-dir", name: "root", isDir: true, parentId: "/" },
+                { id: "old-child", name: "old.txt", isDir: false, size: 1, parentId: "root-dir" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await expect(
+            table.setNodes([
+                { id: "root-dir", name: "root", isDir: true, parentId: "new-child" },
+                { id: "new-child", name: "new-child", isDir: true, parentId: "root-dir" },
+                { id: "new-file", name: "new.txt", isDir: false, size: 2, parentId: "new-child" },
+            ]),
+        ).rejects.toThrow("循环父级")
+
+        expect((await table.get("root-dir"))?.parentId).toBe("/")
+        expect((await table.get("old-child"))?.parentId).toBe("root-dir")
+        expect(await table.get("new-child", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("new-file", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("root-dir"))?.ctotal).toBe(1)
+        expect((await table.get("root-dir"))?.csize).toBe(1)
+    })
+
+    test("同一批次多个 parentId 使用无效排序锚点时应整体失败且不写入其它父级节点", async () => {
+        const table = await createDefinedTreeTable("batch-multi-parent-invalid-index-anchor")
+
+        await table.setNodes(
+            [
+                { id: "left", name: "left", isDir: true, parentId: "/" },
+                { id: "right", name: "right", isDir: true, parentId: "/" },
+                { id: "left-anchor", name: "left.txt", isDir: false, parentId: "left" },
+                { id: "right-anchor", name: "right.txt", isDir: false, parentId: "right" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await expect(
+            table.setNodes(
+                [
+                    { id: "left-new", name: "new-left.txt", isDir: false, parentId: "left" },
+                    { id: "right-new", name: "new-right.txt", isDir: false, parentId: "right" },
+                ],
+                { index: { prevNodeId: "left-anchor" } },
+            ),
+        ).rejects.toThrow("排序参考节点不属于目标父级")
+
+        expect(await table.get("left-new", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("right-new", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await listChildIds(table, "left")).toEqual(["left-anchor"])
+        expect(await listChildIds(table, "right")).toEqual(["right-anchor"])
+    })
+
+    test("replace 复用目标目录后若后续 index 校验失败不应提前删除目标旧子树", async () => {
+        const table = await createDefinedTreeTable("replace-dir-invalid-index-atomic")
+
+        await table.setNodes(
+            [
+                { id: "left", name: "left", isDir: true, parentId: "/" },
+                { id: "right", name: "right", isDir: true, parentId: "/" },
+                { id: "left-anchor", name: "left-anchor.txt", isDir: false, parentId: "left" },
+                { id: "target", name: "pkg", isDir: true, parentId: "right", tag: "old" },
+                { id: "old-child", name: "old.ts", isDir: false, size: 3, parentId: "target" },
+                { id: "old-sub", name: "old-sub", isDir: true, parentId: "target" },
+                { id: "old-deep", name: "deep.ts", isDir: false, size: 5, parentId: "old-sub" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await expect(
+            table.setNodes(
+                [
+                    { id: "incoming", name: "pkg", isDir: true, parentId: "right", tag: "new" },
+                    { id: "incoming-child", name: "new.ts", isDir: false, size: 7, parentId: "incoming" },
+                ],
+                { uniqueBy: "name", overwriteMode: "replace", index: { prevNodeId: "left-anchor" } },
+            ),
+        ).rejects.toThrow("排序参考节点不属于目标父级")
+
+        expect(await table.get("incoming", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("incoming-child", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("target"))?.tag).toBe("old")
+        expect((await table.get("old-child"))?.parentId).toBe("target")
+        expect((await table.get("old-sub"))?.parentId).toBe("target")
+        expect((await table.get("old-deep"))?.parentId).toBe("old-sub")
+        expect(await listChildIds(table, "target")).toEqual(["old-child", "old-sub"])
+        expect((await table.get("target"))?.ctotal).toBe(3)
+        expect((await table.get("target"))?.csize).toBe(8)
+    })
+
     test("应该拒绝不存在的父级和非法节点名称", async () => {
         const table = await createDefinedTreeTable("guard")
 
@@ -125,6 +608,39 @@ describe("TableTree setNodes", () => {
         ).rejects.toThrow()
         expect((await table.get("dir"))?.parentId).toBe("/")
         expect((await table.get("child"))?.parentId).toBe("dir")
+    })
+
+    test("同一批次先移出后代再把祖先挂到该后代下时应按最终树判断为合法", async () => {
+        const table = await createDefinedTreeTable("batch-swap-ancestor-descendant")
+
+        await table.setNodes(
+            [
+                { id: "parent", name: "parent", isDir: true, parentId: "/" },
+                { id: "child", name: "child", isDir: true, parentId: "parent" },
+                { id: "parent-file", name: "parent.txt", isDir: false, size: 2, parentId: "parent" },
+                { id: "child-file", name: "child.txt", isDir: false, size: 3, parentId: "child" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "child", name: "child", isDir: true, parentId: "/" },
+                { id: "parent", name: "parent", isDir: true, parentId: "child" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        expect((await table.get("child"))?.parentId).toBe("/")
+        expect((await table.get("parent"))?.parentId).toBe("child")
+        expect((await table.get("parent-file"))?.parentId).toBe("parent")
+        expect((await table.get("child-file"))?.parentId).toBe("child")
+        expect(await listChildIds(table, "/")).toEqual(["child"])
+        expect(await listChildIds(table, "child")).toEqual(["child-file", "parent"])
+        expect((await table.get("child"))?.ctotal).toBe(3)
+        expect((await table.get("child"))?.csize).toBe(5)
+        expect((await table.get("parent"))?.ctotal).toBe(1)
+        expect((await table.get("parent"))?.csize).toBe(2)
     })
 
     test("同一批次新建节点时应拒绝形成循环父级关系", async () => {
@@ -165,6 +681,56 @@ describe("TableTree setNodes", () => {
         expect(node?.meta).toBeUndefined()
         expect(node?.parentId).toBe("/")
         expect(node?.name).toBe("node")
+    })
+
+    test("setMode overwrite 覆盖已有目录时不应丢失目录自身 metadata", async () => {
+        const table = await createDefinedTreeTable("set-mode-overwrite-dir-metadata")
+
+        await table.setNodes(
+            [
+                { id: "dir", name: "dir", isDir: true, parentId: "/", tag: "old", meta: { keep: true } },
+                { id: "child", name: "child.txt", isDir: false, size: 4, parentId: "dir" },
+                { id: "sub", name: "sub", isDir: true, parentId: "dir" },
+                { id: "deep", name: "deep.txt", isDir: false, size: 6, parentId: "sub" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [{ id: "dir", name: "dir-new", isDir: true, parentId: "/", tag: "new" }],
+            { setMode: "overwrite" },
+        )
+
+        const dir = await table.get("dir")
+        expect(dir?.name).toBe("dir-new")
+        expect(dir?.tag).toBe("new")
+        expect(dir?.meta).toBeUndefined()
+        expect(dir?.ctotal).toBe(3)
+        expect(dir?.cftotal).toBe(2)
+        expect(dir?.csize).toBe(10)
+        expect(await listChildIds(table, "dir")).toEqual(["child", "sub"])
+    })
+
+    test("更新已有目录自身字段时不应把目录 cmodif 当作子树变更推进", async () => {
+        const table = await createDefinedTreeTable("update-dir-own-field-keep-cmodif")
+
+        await table.setNodes(
+            [
+                { id: "dir", name: "dir", isDir: true, parentId: "/", tag: "old" },
+                { id: "child", name: "child.txt", isDir: false, size: 4, parentId: "dir" },
+            ],
+            { index: { toEnd: true } },
+        )
+        const before = await table.get("dir")
+
+        await table.setNodes([{ id: "dir", name: "dir", isDir: true, parentId: "/", tag: "new" }])
+
+        const after = await table.get("dir")
+        expect(after?.tag).toBe("new")
+        expect(after?.ctotal).toBe(1)
+        expect(after?.csize).toBe(4)
+        expect(after?.modif).toBeGreaterThanOrEqual(before!.modif)
+        expect(after?.cmodif).toBe(before?.cmodif)
     })
 
     test("setMode merge 应深度合并已有节点字段", async () => {
@@ -243,6 +809,68 @@ describe("TableTree setNodes", () => {
         expect((node as any)?._isDeleted).toBeUndefined()
     })
 
+    test("同一批次多个 parentId 恢复已删除父级并写入新子树时不应恢复旧删除后代", async () => {
+        const table = await createDefinedTreeTable("restore-deleted-parent-with-new-children")
+
+        await table.setNodes(
+            [
+                { id: "workspace", parentId: "/", name: "workspace", isDir: true },
+                { id: "archive", parentId: "/", name: "archive", isDir: true },
+                { id: "deleted-dir", parentId: "workspace", name: "pkg", isDir: true },
+                { id: "deleted-old-file", parentId: "deleted-dir", name: "old.ts", isDir: false, size: 2 },
+            ],
+            { index: { toEnd: true } },
+        )
+        await table.deleteNodes(["deleted-dir"])
+
+        await table.setNodes(
+            [
+                { id: "deleted-dir", parentId: "archive", name: "pkg", isDir: true, tag: "restored" },
+                { id: "new-dir", parentId: "deleted-dir", name: "src", isDir: true },
+                { id: "new-file", parentId: "new-dir", name: "index.ts", isDir: false, size: 5 },
+                { id: "workspace-note", parentId: "workspace", name: "note.md", isDir: false, size: 3 },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        expect((await table.get("deleted-dir"))?.parentId).toBe("archive")
+        expect((await table.get("deleted-dir"))?.tag).toBe("restored")
+        expect(await table.get("deleted-old-file")).toBeUndefined()
+        expect((await table.get("deleted-old-file", { ignoreMarkDelete: true }) as any)?._isDeleted).toBe(true)
+        expect(await listChildIds(table, "deleted-dir")).toEqual(["new-dir"])
+        expect((await table.get("deleted-dir"))?.ctotal).toBe(2)
+        expect((await table.get("deleted-dir"))?.csize).toBe(5)
+        expect((await table.get("archive"))?.ctotal).toBe(3)
+        expect((await table.get("archive"))?.csize).toBe(5)
+        expect((await table.get("workspace"))?.ctotal).toBe(1)
+        expect((await table.get("workspace"))?.csize).toBe(3)
+    })
+
+    test("同一批次多个 parentId 引用已删除且未恢复的父级时应整体失败", async () => {
+        const table = await createDefinedTreeTable("missing-deleted-parent-atomic")
+
+        await table.setNodes(
+            [
+                { id: "visible", parentId: "/", name: "visible", isDir: true },
+                { id: "deleted-parent", parentId: "/", name: "deleted", isDir: true },
+            ],
+            { index: { toEnd: true } },
+        )
+        await table.deleteNodes(["deleted-parent"])
+
+        await expect(
+            table.setNodes([
+                { id: "valid-child", parentId: "visible", name: "valid.txt", isDir: false, size: 1 },
+                { id: "invalid-child", parentId: "deleted-parent", name: "invalid.txt", isDir: false, size: 2 },
+            ]),
+        ).rejects.toThrow("父节点不存在")
+
+        expect(await table.get("valid-child", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("invalid-child", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("visible"))?.ctotal ?? 0).toBe(0)
+        expect(await table.get("deleted-parent")).toBeUndefined()
+    })
+
     test("replace 覆盖策略应命中冲突节点并保留目标节点 ID", async () => {
         const table = await createDefinedTreeTable("replace")
 
@@ -273,6 +901,45 @@ describe("TableTree setNodes", () => {
         expect(activeNodes[0].id).toBe("last")
         expect(activeNodes[0].tag).toBe("last")
         expect(await table.get("first")).toBeUndefined()
+    })
+
+    test("replace 覆盖策略在多个 parentId 中应只处理同一父级内的同名冲突", async () => {
+        const table = await createDefinedTreeTable("replace-batch-conflict-by-parent")
+
+        await table.setNodes(
+            [
+                { id: "left", parentId: "/", name: "left", isDir: true },
+                { id: "right", parentId: "/", name: "right", isDir: true },
+                { id: "left-old", parentId: "left", name: "same.txt", isDir: false, size: 1, tag: "left-old" },
+                { id: "right-old", parentId: "right", name: "same.txt", isDir: false, size: 2, tag: "right-old" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "left-new-a", parentId: "left", name: "same.txt", isDir: false, size: 3, tag: "left-a" },
+                { id: "left-new-b", parentId: "left", name: "same.txt", isDir: false, size: 4, tag: "left-b" },
+                { id: "right-new", parentId: "right", name: "same.txt", isDir: false, size: 5, tag: "right-new" },
+            ],
+            { uniqueBy: "name", overwriteMode: "replace", index: { toEnd: true } },
+        )
+
+        const leftNodes = await table.findMany({ parentId: "left", name: "same.txt" })
+        const rightNodes = await table.findMany({ parentId: "right", name: "same.txt" })
+        expect(leftNodes).toHaveLength(1)
+        expect(rightNodes).toHaveLength(1)
+        expect(leftNodes[0].id).toBe("left-old")
+        expect(leftNodes[0].tag).toBe("left-b")
+        expect(rightNodes[0].id).toBe("right-old")
+        expect(rightNodes[0].tag).toBe("right-new")
+        expect(await table.get("left-new-a")).toBeUndefined()
+        expect(await table.get("left-new-b")).toBeUndefined()
+        expect(await table.get("right-new")).toBeUndefined()
+        expect((await table.get("left"))?.ctotal).toBe(1)
+        expect((await table.get("left"))?.csize).toBe(4)
+        expect((await table.get("right"))?.ctotal).toBe(1)
+        expect((await table.get("right"))?.csize).toBe(5)
     })
 
     test("replace 覆盖策略处理批次内部同名目录冲突时应跳过被替换目录的整棵子树", async () => {
@@ -407,6 +1074,39 @@ describe("TableTree setNodes", () => {
         expect(await table.get("incoming")).toBeUndefined()
     })
 
+    test("skip 覆盖策略在多个 parentId 中跳过冲突目录时也应跳过它的批次子树", async () => {
+        const table = await createDefinedTreeTable("skip-conflict-dir-with-batch-subtree")
+
+        await table.setNodes(
+            [
+                { id: "left", parentId: "/", name: "left", isDir: true },
+                { id: "right", parentId: "/", name: "right", isDir: true },
+                { id: "left-target", parentId: "left", name: "pkg", isDir: true, tag: "old" },
+                { id: "left-old", parentId: "left-target", name: "old.ts", isDir: false, size: 1 },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "left-source", parentId: "left", name: "pkg", isDir: true, tag: "source" },
+                { id: "left-source-child", parentId: "left-source", name: "new.ts", isDir: false, size: 5 },
+                { id: "right-new", parentId: "right", name: "right.txt", isDir: false, size: 7 },
+            ],
+            { uniqueBy: "name", overwriteMode: "skip", index: { toEnd: true } },
+        )
+
+        expect(await table.get("left-source", { ignoreMarkDelete: true })).toBeUndefined()
+        expect(await table.get("left-source-child", { ignoreMarkDelete: true })).toBeUndefined()
+        expect((await table.get("left-target"))?.tag).toBe("old")
+        expect(await listChildIds(table, "left-target")).toEqual(["left-old"])
+        expect((await table.get("right-new"))?.parentId).toBe("right")
+        expect((await table.get("left"))?.ctotal).toBe(2)
+        expect((await table.get("left"))?.csize).toBe(1)
+        expect((await table.get("right"))?.ctotal).toBe(1)
+        expect((await table.get("right"))?.csize).toBe(7)
+    })
+
     test("newName 覆盖策略应为冲突文件名自动递增后缀", async () => {
         const table = await createDefinedTreeTable("new-name")
 
@@ -438,6 +1138,34 @@ describe("TableTree setNodes", () => {
 
         const names = (await table.findMany({ parentId: "/" }, { sort: { name: 1 } })).map((node) => node.name)
         expect(names).toEqual(["文件 (1).txt", "文件.txt"])
+    })
+
+    test("newName 覆盖策略在多个 parentId 中应分别按各自父级生成不冲突名称", async () => {
+        const table = await createDefinedTreeTable("new-name-multi-parent")
+
+        await table.setNodes(
+            [
+                { id: "left", parentId: "/", name: "left", isDir: true },
+                { id: "right", parentId: "/", name: "right", isDir: true },
+                { id: "left-old", parentId: "left", name: "note.md", isDir: false },
+                { id: "right-old", parentId: "right", name: "note.md", isDir: false },
+                { id: "right-old-1", parentId: "right", name: "note (1).md", isDir: false },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "left-new", parentId: "left", name: "note.md", isDir: false },
+                { id: "right-new", parentId: "right", name: "note.md", isDir: false },
+            ],
+            { uniqueBy: "name", overwriteMode: "newName", index: { toEnd: true } },
+        )
+
+        expect((await table.get("left-new"))?.name).toBe("note (1).md")
+        expect((await table.get("right-new"))?.name).toBe("note (2).md")
+        expect((await listChildIds(table, "left"))).toEqual(["left-old", "left-new"])
+        expect((await listChildIds(table, "right"))).toEqual(["right-old", "right-old-1", "right-new"])
     })
 
     test("merge 覆盖策略应递归合并目录子节点", async () => {
@@ -503,6 +1231,178 @@ describe("TableTree setNodes", () => {
         expect((await table.get("target"))?.csize).toBe(7)
     })
 
+    test("merge 覆盖策略递归合并本批次多层同名目录时应把孙节点挂到最终目标目录", async () => {
+        const table = await createDefinedTreeTable("merge-nested-incoming-dir-conflict")
+
+        await table.setNodes(
+            [
+                { id: "target", parentId: "/", name: "pkg", isDir: true, tag: "target" },
+                { id: "target-sub", parentId: "target", name: "src", isDir: true, tag: "target-sub" },
+                { id: "target-old", parentId: "target-sub", name: "old.ts", isDir: false, size: 1 },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "incoming", parentId: "/", name: "pkg", isDir: true, tag: "incoming" },
+                { id: "incoming-sub", parentId: "incoming", name: "src", isDir: true, tag: "incoming-sub" },
+                { id: "incoming-deep", parentId: "incoming-sub", name: "deep.ts", isDir: false, size: 5 },
+            ],
+            { uniqueBy: "name", overwriteMode: "merge", index: { toEnd: true } },
+        )
+
+        expect(await table.get("incoming")).toBeUndefined()
+        expect(await table.get("incoming-sub")).toBeUndefined()
+        expect((await table.get("target"))?.tag).toBe("incoming")
+        expect((await table.get("target-sub"))?.tag).toBe("incoming-sub")
+        expect((await table.get("incoming-deep"))?.parentId).toBe("target-sub")
+        expect(await listChildIds(table, "target-sub")).toEqual(["target-old", "incoming-deep"])
+        expect((await table.get("target"))?.ctotal).toBe(3)
+        expect((await table.get("target"))?.csize).toBe(6)
+    })
+
+    test("merge 覆盖策略中来源子目录覆盖目标同名文件时应复用目标 ID 并迁移来源子树", async () => {
+        const table = await createDefinedTreeTable("merge-child-dir-replace-file")
+
+        await table.setNodes(
+            [
+                { id: "target", parentId: "/", name: "pkg", isDir: true, tag: "target" },
+                { id: "target-file", parentId: "target", name: "src", isDir: false, size: 1, tag: "old-file" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "incoming", parentId: "/", name: "pkg", isDir: true, tag: "incoming" },
+                { id: "incoming-dir", parentId: "incoming", name: "src", isDir: true, tag: "new-dir" },
+                { id: "incoming-deep", parentId: "incoming-dir", name: "index.ts", isDir: false, size: 5 },
+            ],
+            { uniqueBy: "name", overwriteMode: "merge", index: { toEnd: true } },
+        )
+
+        expect(await table.get("incoming")).toBeUndefined()
+        expect(await table.get("incoming-dir")).toBeUndefined()
+        expect((await table.get("target-file"))?.isDir).toBe(true)
+        expect((await table.get("target-file"))?.tag).toBe("new-dir")
+        expect((await table.get("incoming-deep"))?.parentId).toBe("target-file")
+        expect(await listChildIds(table, "target")).toEqual(["target-file"])
+        expect(await listChildIds(table, "target-file")).toEqual(["incoming-deep"])
+        expect((await table.get("target"))?.ctotal).toBe(2)
+        expect((await table.get("target"))?.csize).toBe(5)
+    })
+
+    test("merge 覆盖策略中连续多层来源目录覆盖目标文件时应持续迁移后代子树", async () => {
+        const table = await createDefinedTreeTable("merge-nested-dir-replace-file-chain")
+
+        await table.setNodes(
+            [
+                { id: "target", parentId: "/", name: "pkg", isDir: true, tag: "target" },
+                { id: "target-src-file", parentId: "target", name: "src", isDir: false, size: 1, tag: "old-src-file" },
+                { id: "target-lib-file", parentId: "target-src-file", name: "lib", isDir: false, size: 2, tag: "old-lib-file" },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "incoming", parentId: "/", name: "pkg", isDir: true, tag: "incoming" },
+                { id: "incoming-src", parentId: "incoming", name: "src", isDir: true, tag: "new-src-dir" },
+                { id: "incoming-lib", parentId: "incoming-src", name: "lib", isDir: true, tag: "new-lib-dir" },
+                { id: "incoming-deep", parentId: "incoming-lib", name: "index.ts", isDir: false, size: 5 },
+            ],
+            { uniqueBy: "name", overwriteMode: "merge", index: { toEnd: true } },
+        )
+
+        expect(await table.get("incoming")).toBeUndefined()
+        expect(await table.get("incoming-src")).toBeUndefined()
+        expect(await table.get("incoming-lib")).toBeUndefined()
+        expect((await table.get("target-src-file"))?.isDir).toBe(true)
+        expect((await table.get("target-src-file"))?.tag).toBe("new-src-dir")
+        expect((await table.get("target-lib-file"))?.isDir).toBe(true)
+        expect((await table.get("target-lib-file"))?.tag).toBe("new-lib-dir")
+        expect((await table.get("incoming-deep"))?.parentId).toBe("target-lib-file")
+        expect(await listChildIds(table, "target")).toEqual(["target-src-file"])
+        expect(await listChildIds(table, "target-src-file")).toEqual(["target-lib-file"])
+        expect(await listChildIds(table, "target-lib-file")).toEqual(["incoming-deep"])
+        expect((await table.get("target-src-file"))?.ctotal).toBe(2)
+        expect((await table.get("target-src-file"))?.csize).toBe(5)
+        expect((await table.get("target"))?.ctotal).toBe(3)
+        expect((await table.get("target"))?.csize).toBe(5)
+    })
+
+    test("merge 覆盖策略中来源文件允许覆盖目标子目录时应删除目标旧子树", async () => {
+        const table = await createDefinedTreeTable("merge-child-file-replace-dir")
+
+        await table.setNodes(
+            [
+                { id: "target", parentId: "/", name: "pkg", isDir: true, tag: "target" },
+                { id: "target-dir", parentId: "target", name: "src", isDir: true, tag: "old-dir" },
+                { id: "target-old-file", parentId: "target-dir", name: "old.ts", isDir: false, size: 7 },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "incoming", parentId: "/", name: "pkg", isDir: true, tag: "incoming" },
+                { id: "incoming-file", parentId: "incoming", name: "src", isDir: false, size: 5, tag: "new-file" },
+            ],
+            {
+                uniqueBy: "name",
+                overwriteMode: "merge",
+                enableFileOverwriteDir: true,
+                index: { toEnd: true },
+            },
+        )
+
+        expect(await table.get("incoming")).toBeUndefined()
+        expect(await table.get("incoming-file")).toBeUndefined()
+        expect((await table.get("target-dir"))?.isDir).toBe(false)
+        expect((await table.get("target-dir"))?.tag).toBe("new-file")
+        expect((await table.get("target-dir"))?.size).toBe(5)
+        expect(await table.get("target-old-file")).toBeUndefined()
+        expect(await listChildIds(table, "target")).toEqual(["target-dir"])
+        expect((await table.get("target"))?.ctotal).toBe(1)
+        expect((await table.get("target"))?.csize).toBe(5)
+    })
+
+    test("merge 覆盖策略在多个 parentId 中应分别合并同名目录且不串线子树", async () => {
+        const table = await createDefinedTreeTable("merge-multi-parent")
+
+        await table.setNodes(
+            [
+                { id: "left", parentId: "/", name: "left", isDir: true },
+                { id: "right", parentId: "/", name: "right", isDir: true },
+                { id: "left-target", parentId: "left", name: "pkg", isDir: true, tag: "left-target" },
+                { id: "left-old", parentId: "left-target", name: "old-left.ts", isDir: false, size: 1 },
+                { id: "right-target", parentId: "right", name: "pkg", isDir: true, tag: "right-target" },
+                { id: "right-old", parentId: "right-target", name: "old-right.ts", isDir: false, size: 2 },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.setNodes(
+            [
+                { id: "left-source", parentId: "left", name: "pkg", isDir: true, tag: "left-source" },
+                { id: "left-new", parentId: "left-source", name: "new-left.ts", isDir: false, size: 3 },
+                { id: "right-source", parentId: "right", name: "pkg", isDir: true, tag: "right-source" },
+                { id: "right-new", parentId: "right-source", name: "new-right.ts", isDir: false, size: 4 },
+            ],
+            { uniqueBy: "name", overwriteMode: "merge", index: { toEnd: true } },
+        )
+
+        expect(await table.get("left-source")).toBeUndefined()
+        expect(await table.get("right-source")).toBeUndefined()
+        expect((await table.get("left-target"))?.tag).toBe("left-source")
+        expect((await table.get("right-target"))?.tag).toBe("right-source")
+        expect(await listChildIds(table, "left-target")).toEqual(["left-old", "left-new"])
+        expect(await listChildIds(table, "right-target")).toEqual(["right-old", "right-new"])
+        expect((await table.get("left"))?.csize).toBe(4)
+        expect((await table.get("right"))?.csize).toBe(6)
+    })
+
     test("mergeByModif 应保留较新的目标目录字段并继续合并子节点", async () => {
         const table = await createDefinedTreeTable("merge-by-modif-older")
 
@@ -543,6 +1443,76 @@ describe("TableTree setNodes", () => {
 
         expect((await table.get("target"))?.tag).toBe("newer")
         expect(await table.get("incoming")).toBeUndefined()
+    })
+
+    test("mergeByModif 递归合并多层目录时应逐层按 modif 保留字段并继续迁移子树", async () => {
+        const table = await createDefinedTreeTable("merge-by-modif-nested-mixed")
+
+        await table.setNodes(
+            [
+                { id: "target", parentId: "/", name: "pkg", isDir: true, tag: "target-newer", modif: 40 },
+                { id: "target-sub", parentId: "target", name: "src", isDir: true, tag: "target-sub-older", modif: 10 },
+                { id: "target-old", parentId: "target-sub", name: "old.ts", isDir: false, size: 1 },
+            ],
+            { index: { toEnd: true } },
+        )
+        await table.updateNodes({ id: "target" }, { $set: { modif: 40 } })
+        await table.updateNodes({ id: "target-sub" }, { $set: { modif: 10 } })
+
+        await table.setNodes(
+            [
+                { id: "incoming", parentId: "/", name: "pkg", isDir: true, tag: "incoming-older", modif: 20 },
+                { id: "incoming-sub", parentId: "incoming", name: "src", isDir: true, tag: "incoming-sub-newer", modif: 50 },
+                { id: "incoming-new", parentId: "incoming-sub", name: "new.ts", isDir: false, size: 5 },
+            ],
+            { uniqueBy: "name", overwriteMode: "mergeByModif", index: { toEnd: true } },
+        )
+
+        expect(await table.get("incoming")).toBeUndefined()
+        expect(await table.get("incoming-sub")).toBeUndefined()
+        expect((await table.get("target"))?.tag).toBe("target-newer")
+        expect((await table.get("target-sub"))?.tag).toBe("incoming-sub-newer")
+        expect((await table.get("incoming-new"))?.parentId).toBe("target-sub")
+        expect(await listChildIds(table, "target-sub")).toEqual(["target-old", "incoming-new"])
+        expect((await table.get("target"))?.ctotal).toBe(3)
+        expect((await table.get("target"))?.csize).toBe(6)
+    })
+
+    test("mergeByModif 在多个 parentId 中应分别按各自冲突节点的 modif 决定保留字段", async () => {
+        const table = await createDefinedTreeTable("merge-by-modif-multi-parent")
+
+        await table.setNodes(
+            [
+                { id: "left", parentId: "/", name: "left", isDir: true },
+                { id: "right", parentId: "/", name: "right", isDir: true },
+                { id: "left-target", parentId: "left", name: "pkg", isDir: true, tag: "left-newer-target", modif: 30 },
+                { id: "left-old-file", parentId: "left-target", name: "old-left.ts", isDir: false, size: 1 },
+                { id: "right-target", parentId: "right", name: "pkg", isDir: true, tag: "right-older-target", modif: 10 },
+                { id: "right-old-file", parentId: "right-target", name: "old-right.ts", isDir: false, size: 2 },
+            ],
+            { index: { toEnd: true } },
+        )
+        await table.updateNodes({ id: "left-target" }, { $set: { modif: 30 } })
+        await table.updateNodes({ id: "right-target" }, { $set: { modif: 10 } })
+
+        await table.setNodes(
+            [
+                { id: "left-source", parentId: "left", name: "pkg", isDir: true, tag: "left-older-source", modif: 20 },
+                { id: "left-new-file", parentId: "left-source", name: "new-left.ts", isDir: false, size: 3 },
+                { id: "right-source", parentId: "right", name: "pkg", isDir: true, tag: "right-newer-source", modif: 40 },
+                { id: "right-new-file", parentId: "right-source", name: "new-right.ts", isDir: false, size: 4 },
+            ],
+            { uniqueBy: "name", overwriteMode: "mergeByModif", index: { toEnd: true } },
+        )
+
+        expect(await table.get("left-source")).toBeUndefined()
+        expect(await table.get("right-source")).toBeUndefined()
+        expect((await table.get("left-target"))?.tag).toBe("left-newer-target")
+        expect((await table.get("right-target"))?.tag).toBe("right-newer-source")
+        expect(await listChildIds(table, "left-target")).toEqual(["left-old-file", "left-new-file"])
+        expect(await listChildIds(table, "right-target")).toEqual(["right-old-file", "right-new-file"])
+        expect((await table.get("left"))?.csize).toBe(4)
+        expect((await table.get("right"))?.csize).toBe(6)
     })
 
     test("默认不允许文件覆盖目录，开启 enableFileOverwriteDir 后应允许覆盖", async () => {

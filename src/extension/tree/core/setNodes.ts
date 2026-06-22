@@ -6,7 +6,7 @@ import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
 import { resolveOverwriteNodes, type IResolveOverwriteNodesResult } from "../util/resolveOverwriteNodes"
 import { rebalanceTreeIndexes } from "../util/rebalanceTreeIndexes"
-import { assertNotMoveIntoSelfOrDescendant, assertTreeParentExists } from "../util/assertTreeParent"
+import { assertTreeParentExists } from "../util/assertTreeParent"
 import { collectDescendantNodes } from "../util/collectDescendantNodes"
 import { repairDuplicatedSiblingNames } from "../util/repairDuplicatedSiblingNames"
 import { repairDuplicatedSiblingConflicts } from "../util/repairDuplicatedSiblingConflicts"
@@ -80,12 +80,15 @@ export async function setNodes(
     const modif = Date.now()
     const presyncResult = await collectSetPresyncResult.call(this, nodes, options)
     const writableNodes = prepareWritableNodes(nodes, modif)
+    const visibleWritableNodes = await filterUpdateOnlyVisibleNodes.call(this, writableNodes, options)
+    assertNoBatchDuplicateNodeConflicts(visibleWritableNodes)
 
     // 先记录原父级，用于 parentId 被修改后刷新旧父级和旧祖先链的统计字段。
-    const oldParentIds = await collectExistingParentIds.call(this, writableNodes)
+    const oldParentIds = await collectExistingParentIds.call(this, visibleWritableNodes)
 
-    const overwriteResult = await applySetOverwrite.call(this, writableNodes, options)
-    const resolvedNodes = await filterUpdateOnlyVisibleNodes.call(this, overwriteResult.nodes, options)
+    const overwriteResult = await applySetOverwrite.call(this, visibleWritableNodes, options)
+    const resolvedNodes = overwriteResult.nodes
+    assertNoBatchDuplicateNodeConflicts(resolvedNodes)
     if (isNoSetWrite(resolvedNodes, overwriteResult)) {
         return buildNoSetWriteResult(presyncResult, options)
     }
@@ -100,6 +103,9 @@ export async function setNodes(
         ? await collectWritableChangedNodeIds.call(this, resolvedNodes, options)
         : []
 
+    if (overwriteResult.deletedNodeIds.length > 0) {
+        await this.deleteNodes(overwriteResult.deletedNodeIds)
+    }
     await this.setMany(resolvedNodes, resolveSetManyOptions(options))
     await restoreWrittenNodesVisibility.call(this, resolvedNodes)
     for (const [parentId, parentNodes] of nodesByParentId) {
@@ -114,6 +120,7 @@ export async function setNodes(
     }
     await refreshTreeMetadata(this, {
         parentIds: [...Array.from(nodesByParentId.keys()), ...oldParentIds],
+        statIds: resolvedNodes.filter((node) => node.isDir).map((node) => node.id),
         cmodif: modif,
     })
     if (options?.overwriteMode === "newName" && (options.uniqueBy ?? "id") === "name") {
@@ -225,6 +232,17 @@ function prepareWritableNodes(nodes: Partial<ITreeNode>[], modif: number): ITree
     })
 }
 
+/** 同一批次内同一个节点 ID 只能出现一次，否则输入无法表达唯一的目录树节点。 */
+function assertNoBatchDuplicateNodeConflicts(nodes: ITreeNode[]): void {
+    const nodeIds = new Set<string>()
+    for (const node of nodes) {
+        if (nodeIds.has(node.id)) {
+            throw new Error(`[TableTree] 重复节点 ID：${node.id}`)
+        }
+        nodeIds.add(node.id)
+    }
+}
+
 /**
  * 校验本次写入涉及的父节点是否存在。
  *
@@ -244,16 +262,53 @@ async function assertSetNodeParents(
     }
 }
 
-/** setNodes 可以移动已有节点，写入前必须拒绝把节点挂到自己或现有后代下面，避免失败后留下循环父级。 */
+/** setNodes 可以移动已有节点，写入前必须按最终父级链拒绝会形成环的批量移动。 */
 async function assertSetNodeParentMoves(this: TableTree<ITreeNode>, writableNodes: ITreeNode[]): Promise<void> {
     assertNoBatchParentCycles(writableNodes)
+
+    const finalParentIdByNodeId = new Map(writableNodes.map((node) => [node.id, node.parentId]))
+    const oldParentIdCache = new Map<string, string | undefined>()
+    const getFinalParentId = async (nodeId: string): Promise<string | undefined> => {
+        const batchParentId = finalParentIdByNodeId.get(nodeId)
+        if (batchParentId !== undefined) return batchParentId
+        if (oldParentIdCache.has(nodeId)) return oldParentIdCache.get(nodeId)
+
+        const oldNode = await this.get(nodeId, { ignoreMarkDelete: true })
+        oldParentIdCache.set(nodeId, oldNode?.parentId)
+        return oldNode?.parentId
+    }
 
     for (const node of writableNodes) {
         const oldNode = await this.get(node.id, { ignoreMarkDelete: true })
         if (!oldNode || oldNode.parentId === node.parentId) {
             continue
         }
-        await assertNotMoveIntoSelfOrDescendant(this, [node.id], node.parentId)
+        await assertNoFinalMoveCycle(node.id, node.parentId, getFinalParentId)
+    }
+}
+
+/** 按批量写入后的最终父级链校验移动结果，允许同批次先把后代移出再重排祖先。 */
+async function assertNoFinalMoveCycle(
+    nodeId: string,
+    parentId: string,
+    getFinalParentId: (nodeId: string) => Promise<string | undefined>,
+): Promise<void> {
+    if (parentId === "/") return
+    if (parentId === nodeId) {
+        throw new Error("[TableTree] 不能把节点移动到自己下面")
+    }
+
+    const visited = new Set<string>()
+    let currentParentId: string | undefined = parentId
+    while (currentParentId && currentParentId !== "/") {
+        if (currentParentId === nodeId) {
+            throw new Error("[TableTree] 不能把节点移动到自己的后代节点中")
+        }
+        if (visited.has(currentParentId)) {
+            throw new Error(`[TableTree] 检测到循环父级引用：${currentParentId}`)
+        }
+        visited.add(currentParentId)
+        currentParentId = await getFinalParentId(currentParentId)
     }
 }
 
@@ -357,14 +412,21 @@ async function applySetOverwrite(
             collectDiscardedBatchNodeIds(parentNodes, resolved, discardedBatchNodeIds)
             const targetSetResult = resolveTargetSetNodes(resolved)
             replacePairsForCleanup.push(...resolved.replacePairs)
-            if (targetSetResult.deleteNodeIds.length > 0) {
-                await this.deleteNodes(targetSetResult.deleteNodeIds)
-                deletedNodeIds.push(...targetSetResult.deleteNodeIds)
-            }
+            deletedNodeIds.push(...targetSetResult.deleteNodeIds)
 
             for (const pair of resolved.replacePairs) {
                 if (pair.sourceNode.id !== pair.targetNode.id) {
                     replacedSourceIdByTargetId.set(pair.sourceNode.id, pair.targetNode.id)
+                }
+                if (pair.sourceNode.isDir && discardedBatchNodeIds.has(pair.sourceNode.id)) {
+                    // 来源目录来自 merge 改挂后的旧路径时，原路径子树已被跳过，需要按复用的目标 ID 重新排队。
+                    const sourceChildren = await collectMergeSourceChildren.call(this, pair.sourceNode.id, nodes)
+                    for (const node of sourceChildren) {
+                        pendingNodes.push({
+                            ...node,
+                            parentId: pair.targetNode.id,
+                        })
+                    }
                 }
             }
 
@@ -384,6 +446,8 @@ async function applySetOverwrite(
                 // 来源目录的直接子节点需要转移到目标目录下，下一轮继续处理子级冲突。
                 const sourceChildren = await collectMergeSourceChildren.call(this, pair.sourceNode.id, nodes)
                 for (const node of sourceChildren) {
+                    // 旧来源路径下的后代会在改挂后的新路径继续处理，原路径上的同批次后代必须跳过。
+                    discardedBatchNodeIds.add(node.id)
                     pendingNodes.push({
                         ...node,
                         parentId: pair.targetNode.id,
@@ -396,7 +460,7 @@ async function applySetOverwrite(
     }
 
     reparentReplacedSourceChildren(nextNodes, replacedSourceIdByTargetId)
-    const replacedDescendantIds = await deleteReplacedTargetDescendants.call(this, replacePairsForCleanup, nextNodes)
+    const replacedDescendantIds = await collectReplacedTargetDescendantIds.call(this, replacePairsForCleanup, nextNodes)
     deletedNodeIds.push(...replacedDescendantIds)
 
     return {
@@ -424,7 +488,7 @@ function reparentReplacedSourceChildren(nodes: ITreeNode[], replacedSourceIdByTa
 }
 
 /** replace 复用目标节点 ID 时，需要清理目标目录原有子树，避免旧子节点残留在新节点下面。 */
-async function deleteReplacedTargetDescendants(
+async function collectReplacedTargetDescendantIds(
     this: TableTree<ITreeNode>,
     replacePairs: IResolveOverwriteNodesResult<ITreeNode>["replacePairs"],
     nextNodes: ITreeNode[],
@@ -444,7 +508,6 @@ async function deleteReplacedTargetDescendants(
             .map((node) => node.id)
             .filter((nodeId) => !nextNodeIds.has(nodeId))
         if (descendantIds.length > 0) {
-            await this.deleteNodes(descendantIds)
             deletedIds.push(...descendantIds)
         }
     }

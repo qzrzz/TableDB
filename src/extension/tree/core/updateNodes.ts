@@ -354,34 +354,69 @@ function hasUnsetStatsField(
 }
 
 function normalizeTreeUpdateOp(updateOp: ITableUpdateOp<ITreeNode>, modif: number): ITableUpdateOp<ITreeNode> {
-    const nextUpdateOp: ITableUpdateOp<ITreeNode> = { ...updateOp }
-    if (nextUpdateOp.$set) {
-        const nextSet: Record<string, any> = {}
-        for (const [key, value] of Object.entries(nextUpdateOp.$set)) {
-            if (!isTreeManagedField(key)) {
-                nextSet[key] = value
-            }
-        }
-        if (nextSet.modif === undefined) {
-            nextSet.modif = modif
-        }
-        nextUpdateOp.$set = nextSet as any
-    } else {
-        nextUpdateOp.$set = { modif } as any
+    const nextUpdateOp: ITableUpdateOp<ITreeNode> = {}
+    const nextSet = stripManagedUpdateFields(updateOp.$set as Record<string, any> | undefined)
+    if (nextSet.modif === undefined) {
+        nextSet.modif = modif
     }
-
-    if (nextUpdateOp.$unset) {
-        const unsetEntries = Array.isArray(nextUpdateOp.$unset)
-            ? nextUpdateOp.$unset.map((key) => [key, true] as const)
-            : Object.entries(nextUpdateOp.$unset)
-        const nextUnset: Record<string, true | 1> = {}
-        for (const [key, value] of unsetEntries) {
-            if (!isTreeManagedField(key)) {
-                nextUnset[key] = value as true | 1
-            }
-        }
-        nextUpdateOp.$unset = nextUnset
-    }
-
+    nextUpdateOp.$set = nextSet as any
+    assignNonEmptyOp(nextUpdateOp, "$setOnInsert", stripManagedUpdateFields(updateOp.$setOnInsert as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$unset", stripManagedUnsetFields(updateOp.$unset))
+    assignNonEmptyOp(nextUpdateOp, "$inc", stripManagedUpdateFields(updateOp.$inc as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$mul", stripManagedUpdateFields(updateOp.$mul as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$max", stripManagedUpdateFields(updateOp.$max as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$min", stripManagedUpdateFields(updateOp.$min as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$push", stripManagedUpdateFields(updateOp.$push as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$addToSet", stripManagedUpdateFields(updateOp.$addToSet as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$pull", stripManagedUpdateFields(updateOp.$pull as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$pop", stripManagedUpdateFields(updateOp.$pop as Record<string, any> | undefined))
+    assignNonEmptyOp(nextUpdateOp, "$rename", stripManagedRenameFields(updateOp.$rename as Record<string, string> | undefined))
     return nextUpdateOp
+}
+
+/** 任何外部更新算子都不能直接改写目录树统计字段，这些字段只能由树操作统一维护。 */
+function stripManagedUpdateFields(op: Record<string, any> | undefined): Record<string, any> {
+    const nextOp: Record<string, any> = {}
+    for (const [key, value] of Object.entries(op ?? {})) {
+        if (!isTreeManagedField(key)) {
+            nextOp[key] = value
+        }
+    }
+    return nextOp
+}
+
+/** $unset 支持数组和对象两种写法，这里统一清理后转为对象写法。 */
+function stripManagedUnsetFields(unsetOp: ITableUpdateOp<ITreeNode>["$unset"]): Record<string, true | 1> {
+    const unsetEntries = Array.isArray(unsetOp)
+        ? unsetOp.map((key) => [key, true] as const)
+        : Object.entries(unsetOp ?? {})
+    const nextUnset: Record<string, true | 1> = {}
+    for (const [key, value] of unsetEntries) {
+        if (!isTreeManagedField(key)) {
+            nextUnset[key] = value as true | 1
+        }
+    }
+    return nextUnset
+}
+
+/** rename 的来源或目标只要碰到统计字段，就整条忽略，避免覆盖或搬走系统维护值。 */
+function stripManagedRenameFields(renameOp: Record<string, string> | undefined): Record<string, string> {
+    const nextRename: Record<string, string> = {}
+    for (const [fromKey, toKey] of Object.entries(renameOp ?? {})) {
+        if (!isTreeManagedField(fromKey) && !isTreeManagedField(toKey)) {
+            nextRename[fromKey] = toKey
+        }
+    }
+    return nextRename
+}
+
+function assignNonEmptyOp(
+    updateOp: ITableUpdateOp<ITreeNode>,
+    key: keyof ITableUpdateOp<ITreeNode>,
+    value: Record<string, any>,
+): void {
+    if (Object.keys(value).length > 0) {
+        const writableUpdateOp = updateOp as Record<string, any>
+        writableUpdateOp[key] = value
+    }
 }
