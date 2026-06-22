@@ -19,7 +19,7 @@
         "bench:tree": "node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
         "bench:tree:all": "TABLE_TREE_BENCH_ADAPTERS=sqlite,mongodb node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
         "docs:dev": "starmap --rebuild --port=4811",
-        "docs:build": "starmap build"
+        "docs:build": "starmap build --buildDir=docs"
     },
     "devDependencies": {
         "@fontsource/jetbrains-mono": "5.2.8",
