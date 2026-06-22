@@ -112,6 +112,121 @@ describe("TableTree 目录树 metadata 组合一致性", () => {
         expect(dirAfter?.cmodif).toBeGreaterThan(dirBefore!.cmodif ?? 0)
     })
 
+    test("批量新增同一深层目录的节点时应按祖先链聚合增量 metadata", async () => {
+        const table = await createDefinedTreeTable("incremental-create-ancestor-delta")
+
+        await table.setNodes(
+            [
+                { id: "root", parentId: "/", name: "root", isDir: true },
+                { id: "level-a", parentId: "root", name: "a", isDir: true },
+                { id: "level-b", parentId: "level-a", name: "b", isDir: true },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.createNodes(
+            [
+                { id: "file-a", name: "a.txt", isDir: false, size: 3 },
+                { id: "file-b", name: "b.txt", isDir: false, size: 5 },
+                { id: "nested", name: "nested", isDir: true },
+            ],
+            "level-b",
+            { index: { toEnd: true } },
+        )
+        await table.createNodes([{ id: "deep-file", name: "deep.txt", isDir: false, size: 7 }], "nested", {
+            index: { toEnd: true },
+        })
+
+        expect((await table.get("level-b"))?.ctotal).toBe(4)
+        expect((await table.get("level-b"))?.cftotal).toBe(3)
+        expect((await table.get("level-b"))?.csize).toBe(15)
+        expect((await table.get("level-a"))?.ctotal).toBe(5)
+        expect((await table.get("level-a"))?.cftotal).toBe(3)
+        expect((await table.get("level-a"))?.csize).toBe(15)
+        expect((await table.get("root"))?.ctotal).toBe(6)
+        expect((await table.get("root"))?.cftotal).toBe(3)
+        expect((await table.get("root"))?.csize).toBe(15)
+        await expectAllVisibleMetadataAccurate(table)
+    })
+
+    test("删除最后一个子节点后应清空零值统计和 childLastIndex", async () => {
+        const table = await createDefinedTreeTable("incremental-delete-zero-unset")
+
+        await table.createNodes([{ id: "dir", name: "dir", isDir: true }], "/")
+        await table.createNodes([{ id: "only", name: "only.txt", isDir: false, size: 11 }], "dir", {
+            index: { toEnd: true },
+        })
+
+        expect((await table.get("dir"))?.ctotal).toBe(1)
+        expect((await table.get("dir"))?.childLastIndex).toBe((await table.get("only"))?.index)
+
+        await table.deleteNodes(["only"])
+
+        const dir = await table.get("dir")
+        expect(dir?.ctotal).toBeUndefined()
+        expect(dir?.cftotal).toBeUndefined()
+        expect(dir?.csize).toBeUndefined()
+        expect(dir?.childLastIndex).toBeUndefined()
+        await expectAllVisibleMetadataAccurate(table)
+    })
+
+    test("部分恢复被删除目录时不应使用旧 metadata 多恢复未恢复后代", async () => {
+        const table = await createDefinedTreeTable("incremental-undelete-partial-stats")
+
+        await table.setNodes(
+            [
+                { id: "root", parentId: "/", name: "root", isDir: true },
+                { id: "dir", parentId: "root", name: "dir", isDir: true },
+                { id: "child-file", parentId: "dir", name: "child.txt", isDir: false, size: 10 },
+                { id: "child-dir", parentId: "dir", name: "child-dir", isDir: true },
+                { id: "deep-file", parentId: "child-dir", name: "deep.txt", isDir: false, size: 20 },
+                { id: "last-deleted", parentId: "dir", name: "zz-last.txt", isDir: false, size: 30 },
+            ],
+            { index: { toEnd: true } },
+        )
+        await table.deleteNodes(["dir"])
+
+        await table.unDeleteNodes(["deep-file"])
+
+        expect(await table.get("child-file")).toBeUndefined()
+        expect(await table.get("last-deleted")).toBeUndefined()
+        expect((await table.get("dir"))?.ctotal).toBe(2)
+        expect((await table.get("dir"))?.cftotal).toBe(1)
+        expect((await table.get("dir"))?.csize).toBe(20)
+        expect((await table.get("child-dir"))?.ctotal).toBe(1)
+        expect((await table.get("child-dir"))?.cftotal).toBe(1)
+        expect((await table.get("child-dir"))?.csize).toBe(20)
+        expect((await table.get("root"))?.ctotal).toBe(3)
+        expect((await table.get("root"))?.cftotal).toBe(1)
+        expect((await table.get("root"))?.csize).toBe(20)
+        await expectAllVisibleMetadataAccurate(table)
+    })
+
+    test("增量 updateNodes 修改 size 和 isDir 时应同步刷新所有可见祖先统计", async () => {
+        const table = await createDefinedTreeTable("incremental-update-stats-delta")
+
+        await table.setNodes(
+            [
+                { id: "root", parentId: "/", name: "root", isDir: true },
+                { id: "dir", parentId: "root", name: "dir", isDir: true },
+                { id: "child", parentId: "dir", name: "child", isDir: true },
+                { id: "file", parentId: "child", name: "file.txt", isDir: false, size: 10 },
+            ],
+            { index: { toEnd: true } },
+        )
+
+        await table.updateNodes({ id: "file" }, { $set: { size: 25 } })
+        await table.updateNodes({ id: "child" }, { $set: { isDir: false } })
+
+        expect((await table.get("dir"))?.ctotal).toBe(2)
+        expect((await table.get("dir"))?.cftotal).toBe(2)
+        expect((await table.get("dir"))?.csize).toBe(25)
+        expect((await table.get("root"))?.ctotal).toBe(3)
+        expect((await table.get("root"))?.cftotal).toBe(2)
+        expect((await table.get("root"))?.csize).toBe(25)
+        await expectAllVisibleMetadataAccurate(table)
+    })
+
     test("多种移动覆盖策略和排序参数组合后 metadata 应保持正确", async () => {
         const table = await createDefinedTreeTable("move-overwrite-index-metadata")
 

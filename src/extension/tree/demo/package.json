@@ -1,0 +1,22 @@
+{
+    "name": "table-tree-demo",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "bun run dev:api & bun run dev:web; wait",
+        "dev:api": "node --import tsx src/server.ts",
+        "dev:web": "vite --host 127.0.0.1 --port 5174",
+        "build": "vite build",
+        "start": "node --import tsx src/server.ts"
+    },
+    "dependencies": {
+        "better-sqlite3": "12.6.0",
+        "chalk": "5.6.2",
+        "vite": "latest"
+    },
+    "devDependencies": {
+        "tsx": "latest",
+        "typescript": "latest"
+    }
+}

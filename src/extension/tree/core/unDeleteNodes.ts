@@ -75,6 +75,7 @@ interface IRestoredDirStats {
     ctotal: number
     cftotal: number
     csize: number
+    childLastIndex?: string
 }
 
 /** 根据本次真正恢复的节点集合，重建被恢复目录内部的可见统计，避免仍删除的后代被旧 metadata 带回来。 */
@@ -95,6 +96,10 @@ function calcRestoredDirStats(nodes: ITreeNode[]): Map<string, IRestoredDirStats
                 stats.ctotal += 1
                 stats.cftotal += node.isDir ? 0 : 1
                 stats.csize += node.size ?? 0
+                if (parentId === node.parentId && node.index && (!stats.childLastIndex || node.index > stats.childLastIndex)) {
+                    // 目录恢复可能只恢复部分子级，childLastIndex 必须按本次真实可见的直接子级重建。
+                    stats.childLastIndex = node.index
+                }
             }
             parentId = nodeById.get(parentId)?.parentId
         }
@@ -124,10 +129,16 @@ async function updateRestoredDirMetadata(
         setNumberStat($set, $unset, "ctotal", stats.ctotal)
         setNumberStat($set, $unset, "cftotal", stats.cftotal)
         setNumberStat($set, $unset, "csize", stats.csize)
+        if (stats.childLastIndex) {
+            $set.childLastIndex = stats.childLastIndex
+        } else {
+            $unset.childLastIndex = true
+        }
         if (
             node.ctotal !== stats.ctotal ||
             node.cftotal !== stats.cftotal ||
-            node.csize !== stats.csize
+            node.csize !== stats.csize ||
+            node.childLastIndex !== stats.childLastIndex
         ) {
             $set.modif = cmodif
         }
