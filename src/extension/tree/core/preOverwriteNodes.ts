@@ -1,11 +1,12 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode, ITreeOverwriteOptions } from "../tree.types"
 import { getNodeValueByPath } from "../util/getNodeValueByPath"
+import { collectTopSelectedNodes } from "../util/collectTopSelectedNodes"
 
 /** 检测节点冲突的选项
  *
- * 这里直接复用树覆盖策略选项，保证 checkNodes 的预检语义与 moveNodes / setNodes 一致。
- */ /** 移动节点选项 */
+ * 这里直接复用树覆盖策略选项，保证预检语义与 moveNodes / setNodes 一致。
+ */
 export interface ITreePreOverwriteOptions extends ITreeOverwriteOptions {
     /** existNodes 返回的投影字段
      *
@@ -24,8 +25,17 @@ export interface ITreePreOverwriteResult<TNode extends ITreeNode = ITreeNode> {
     existNodes: Partial<TNode>[]
 }
 
-/** 预覆盖检测
- * 相当于进行一次预检 setNodes 的覆盖操作，检查目标位置是否已经存在与要移动/设置的节点冲突的节点
+/**
+ * 预覆盖检测
+ *
+ * 在不修改任何数据的前提下，检查一批待写入节点或待移动节点在目标父级下是否会发生唯一键冲突。
+ *
+ * 核心流程：
+ * 1. 根据 uniqueBy 收集待写入 nodes 中的唯一键值。
+ * 2. 读取待移动 nodeIds 对应的最外层节点，并收集它们的唯一键值；父子混合移动时后代不参与预检。
+ * 3. 如果没有可检测值，直接返回无冲突。
+ * 4. 在目标 parentId 的直属子节点里查找这些唯一键值，并排除正在移动的节点自身。
+ * 5. 返回冲突节点列表；overwriteMode 不会改变预检结果，因为这里不执行覆盖动作。
  */
 export async function preOverwriteNodes(
     this: TableTree<ITreeNode>,
@@ -40,12 +50,14 @@ export async function preOverwriteNodes(
     const uniqueBy = options?.uniqueBy ?? "id"
     const values = new Set<any>()
 
+    // 待 setNodes 的新数据可能还没有落库，只能从传入对象中读取 uniqueBy 值。
     for (const node of nodes) {
         const value = getNodeValueByPath(node, uniqueBy)
         if (value !== undefined) values.add(value)
     }
 
-    const moveRootNodes = await collectMoveRootNodes.call(this, nodeIds)
+    // 待 moveNodes 的来源节点需要读取当前库中数据，且保持和 moveNodes 一样的父子混合选择语义。
+    const moveRootNodes = await collectTopSelectedNodes(this, nodeIds)
     for (const node of moveRootNodes) {
         const value = getNodeValueByPath(node, uniqueBy)
         if (value !== undefined) values.add(value)
@@ -56,6 +68,7 @@ export async function preOverwriteNodes(
     }
 
     const movingNodeIds = new Set(nodeIds)
+    // 预检只关注目标父级的直属子节点；移动自身不应被报告为与自己冲突。
     const existNodes = (await this.findMany(
         {
             parentId,
@@ -70,32 +83,4 @@ export async function preOverwriteNodes(
         isConflict: existNodes.length > 0,
         existNodes,
     }
-}
-
-/** 预检移动节点时需要和 moveNodes 一样忽略已选中父节点下面的后代，避免报告不会发生的平铺冲突。 */
-async function collectMoveRootNodes(this: TableTree<ITreeNode>, nodeIds: string[]): Promise<ITreeNode[]> {
-    const uniqueNodeIds = Array.from(new Set(nodeIds)).filter(Boolean)
-    const nodes = (await Promise.all(uniqueNodeIds.map((nodeId) => this.get(nodeId)))).filter(
-        (node): node is ITreeNode => !!node,
-    )
-    const selectedIds = new Set(nodes.map((node) => node.id))
-    const roots: ITreeNode[] = []
-
-    for (const node of nodes) {
-        let parentId = node.parentId
-        let hasSelectedAncestor = false
-        while (parentId && parentId !== "/") {
-            if (selectedIds.has(parentId)) {
-                hasSelectedAncestor = true
-                break
-            }
-            const parentNode = await this.get(parentId, { ignoreMarkDelete: true })
-            parentId = parentNode?.parentId ?? "/"
-        }
-        if (!hasSelectedAncestor) {
-            roots.push(node)
-        }
-    }
-
-    return roots
 }

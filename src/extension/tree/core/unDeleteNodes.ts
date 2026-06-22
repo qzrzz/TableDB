@@ -2,9 +2,7 @@ import type { TableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
 import { collectDescendantNodes } from "../util/collectDescendantNodes"
 import { applyTreeMetadataDelta } from "../util/applyTreeMetadataDelta"
-
-/** 恢复节点选项 */
-export interface ITreeUnDeleteNodesOptions {}
+import { setTreeNumberStat } from "../util/setTreeNumberStat"
 
 /** 删除节点结果 */
 export interface ITreeDeleteResult {
@@ -16,27 +14,34 @@ export interface ITreeDeleteResult {
     deletedCount: number
 }
 
-/** 恢复已删除的节点
+/**
+ * 恢复已删除的节点
  *
  * 如果 TableTree 设置了 `enableMarkDelete: true`，
  * 则删除节点时会把节点标记为已删除而不是直接从数据库中删除
  * 这时就可以通过 `unDeleteNodes()` 方法来恢复这些被标记为已删除的节点。
- * 恢复时应当按后续实现的统一规则一并恢复子节点，
- * 注意要重新维护祖先节点上的树 metadata 字段
+ *
+ * 核心流程：
+ * 1. 读取待恢复节点的整棵后代子树，同时读取祖先链，避免恢复深层节点后出现可见孤儿节点。
+ * 2. 只对当前确实处于 _isDeleted 状态的节点执行恢复，未删除节点不改动。
+ * 3. 先基于“本次真实恢复的节点集合”重建被恢复目录内部统计，避免把仍然删除的后代计入 metadata。
+ * 4. 用最外层恢复节点的贡献量增量刷新外部父级和祖先。
+ * 5. 单独修正被恢复目录自身的 ctotal/cftotal/csize/childLastIndex，让恢复后的子树内部也保持一致。
  */
 export async function unDeleteNodes(
     this: TableTree<ITreeNode>,
     /** 要恢复的节点 id 列表 */
     nodeIds: string[],
-    options?: ITreeUnDeleteNodesOptions,
 ): Promise<void> {
     const uniqueNodeIds = Array.from(new Set(nodeIds))
     if (uniqueNodeIds.length === 0) return
 
+    // includeSelf 恢复入口节点本身；ignoreMarkDelete 允许读取已删除节点及其后代。
     const descendantNodes = await collectDescendantNodes(this, uniqueNodeIds, {
         includeSelf: true,
         ignoreMarkDelete: true,
     })
+    // 恢复深层节点时，父级如果仍处于删除状态，也要一起恢复，否则列表可见性会断层。
     const ancestorNodes = await collectAncestorNodes.call(this, uniqueNodeIds)
     const nodesById = new Map<string, ITreeNode>()
     for (const node of [...ancestorNodes, ...descendantNodes]) {
@@ -68,6 +73,7 @@ export async function unDeleteNodes(
             refreshChildLastIndex: true,
         }
     }), modif)
+    // applyTreeMetadataDelta 维护的是外部父级链；被恢复目录自身的内部统计需要按恢复集合重建。
     await updateRestoredDirMetadata(this, restoredNodes, restoredStatsByDirId, modif)
 }
 
@@ -126,9 +132,9 @@ async function updateRestoredDirMetadata(
         const $set: Record<string, any> = { cmodif }
         const $unset: Record<string, true> = {}
 
-        setNumberStat($set, $unset, "ctotal", stats.ctotal)
-        setNumberStat($set, $unset, "cftotal", stats.cftotal)
-        setNumberStat($set, $unset, "csize", stats.csize)
+        setTreeNumberStat($set, $unset, "ctotal", stats.ctotal)
+        setTreeNumberStat($set, $unset, "cftotal", stats.cftotal)
+        setTreeNumberStat($set, $unset, "csize", stats.csize)
         if (stats.childLastIndex) {
             $set.childLastIndex = stats.childLastIndex
         } else {
@@ -151,19 +157,6 @@ async function updateRestoredDirMetadata(
 
     if (updates.length > 0) {
         await table.bulkUpdate(updates)
-    }
-}
-
-function setNumberStat(
-    $set: Record<string, any>,
-    $unset: Record<string, true>,
-    key: "ctotal" | "cftotal" | "csize",
-    value: number,
-) {
-    if (value > 0) {
-        $set[key] = value
-    } else {
-        $unset[key] = true
     }
 }
 

@@ -1,6 +1,7 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
 import { collectAncestorIds } from "./collectAncestorIds"
+import { setTreeNumberStat } from "./setTreeNumberStat"
 
 export interface IRefreshTreeMetadataOptions {
     /** 可能受影响的父级 ID。 */
@@ -151,9 +152,9 @@ async function calcRefreshNodeUpdateOp<TNode extends ITreeNode>(
     const $set: Record<string, any> = {}
     const $unset: Record<string, true> = {}
 
-    setNumberStat($set, $unset, "ctotal", stats.ctotal)
-    setNumberStat($set, $unset, "cftotal", stats.cftotal)
-    setNumberStat($set, $unset, "csize", stats.csize)
+    setTreeNumberStat($set, $unset, "ctotal", stats.ctotal)
+    setTreeNumberStat($set, $unset, "cftotal", stats.cftotal)
+    setTreeNumberStat($set, $unset, "csize", stats.csize)
 
     if (stats.childLastIndex) {
         $set.childLastIndex = stats.childLastIndex
@@ -175,19 +176,6 @@ async function calcRefreshNodeUpdateOp<TNode extends ITreeNode>(
     }
 
     return { $set: $set as any, $unset }
-}
-
-function setNumberStat(
-    $set: Record<string, any>,
-    $unset: Record<string, true>,
-    key: "ctotal" | "cftotal" | "csize",
-    value: number,
-) {
-    if (value > 0) {
-        $set[key] = value
-    } else {
-        $unset[key] = true
-    }
 }
 
 function isExistingStatChanged(oldValue: number | undefined, newValue: number): boolean {

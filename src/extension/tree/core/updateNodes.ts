@@ -16,14 +16,32 @@ export interface ITreeUpdateNodesOptions {
     deep?: boolean
 }
 
-/** 更新节点
+interface IUpdateTargetNodes {
+    /** 本次真实会被更新的节点，deep 模式下包含后代。 */
+    nodes: ITreeNode[]
+    /** 去重后的更新节点 ID。 */
+    nodeIds: string[]
+    /** 更新前受影响的父级，用于后续刷新 metadata。 */
+    parentIds: string[]
+}
+
+/**
+ * 更新节点
  *
  * 更底层的更新接口，可以一次更新多个经 filter 筛选的文档。
  * 可以通过 `options.deep` 参数递归更新子节点。
  *
  * 一次操作更新的所有节点都有相同的 modif, cmodif 值
  *
- * 要注意如果修改了节点的  需要触发相应的 metadata 变更，通过此接口修改 parentId 不能进行覆盖检查所以要注意
+ * 核心流程：
+ * 1. 先判断 updateOp 是否会影响树统计字段，决定读取轻量投影还是统计投影。
+ * 2. 根据 filter 收集目标节点；deep 模式会把目标节点的后代也纳入同一次更新。
+ * 3. 校验 updateOp 不会破坏树结构：不能改 id，不能移除必填字段，deep 不能同时改 parentId。
+ * 4. 清理外部传入的系统维护字段，并补齐本次统一 modif。
+ * 5. 执行真实更新；批量移动 parentId 时为每个移动节点分配独立 index。
+ * 6. 如果能从旧节点和 $set 直接推导统计变化，就走增量 metadata；否则用 refreshTreeMetadata 全量刷新兜底。
+ *
+ * 注意：此接口不会执行覆盖检查。调用方直接修改 parentId 时，需要自行确保目标父级下不会出现业务冲突。
  */
 export async function updateNodes(
     this: TableTree<ITreeNode>,
@@ -31,39 +49,29 @@ export async function updateNodes(
     updateOp: ITableUpdateOp<ITreeNode>,
     options?: ITreeUpdateNodesOptions,
 ): Promise<ITreeChangeResult> {
+    // 只有 size/isDir/index 等会影响目录统计的更新，才需要读取完整统计投影。
     const statsChanged = isTreeStatsAffectedUpdateOp(updateOp)
     const canApplyIncrementalMetadata = statsChanged && canApplyIncrementalUpdateMetadata(updateOp)
-    const targetNodes = await this.findMany(filter, {
-        projection: canApplyIncrementalMetadata
-            ? ["id", "parentId", "index", "isDir", "size", "ctotal", "cftotal", "csize"]
-            : ["id", "parentId"],
-    })
-    if (targetNodes.length === 0) {
+    const target = await collectUpdateTargetNodes.call(this, filter, options, canApplyIncrementalMetadata)
+    if (target.nodes.length === 0) {
         return {}
     }
 
-    const allNodes = [...targetNodes]
-    if (options?.deep) {
-        const childNodes = await collectDescendantNodes(this, targetNodes.map((node) => node.id), {
-            ignoreMarkDelete: true,
-        })
-        allNodes.push(...childNodes)
-    }
-
-    const updateNodeIds = Array.from(new Set(allNodes.map((node) => node.id)))
-    const parentIds = Array.from(new Set(allNodes.map((node) => node.parentId)))
     const newModif = Number((updateOp.$set as any)?.modif ?? Date.now())
-    await assertUpdateOpSafe.call(this, updateNodeIds, updateOp, options)
+    await assertUpdateOpSafe.call(this, target.nodeIds, updateOp, options)
+    // cleanUpdateOp 会过滤 ctotal/csize/childLastIndex 等系统字段，防止外部直接破坏 metadata。
     const cleanUpdateOp = normalizeTreeUpdateOp(updateOp, newModif)
 
-    await applyUpdateNodes.call(this, allNodes, updateNodeIds, cleanUpdateOp, updateOp)
+    await applyUpdateNodes.call(this, target.nodes, target.nodeIds, cleanUpdateOp, updateOp)
     const setOp = updateOp.$set as Record<string, any> | undefined
     if (canApplyIncrementalMetadata) {
-        await applyUpdateMetadataDelta(this, allNodes, setOp, newModif)
+        // 简单 $set 修改可以直接从旧值和新值计算贡献差，避免扫描所有兄弟节点。
+        await applyUpdateMetadataDelta(this, target.nodes, setOp, newModif)
     } else {
+        // 复杂算子或 parentId 移动在并发场景下更容易基于过期状态，使用全量刷新保证最终收敛正确。
         await refreshTreeMetadata(this, {
-            parentIds,
-            nodeIds: setOp?.parentId !== undefined ? updateNodeIds : undefined,
+            parentIds: target.parentIds,
+            nodeIds: setOp?.parentId !== undefined ? target.nodeIds : undefined,
             cmodif: newModif,
             statsChanged,
         })
@@ -75,6 +83,38 @@ export async function updateNodes(
     }
 }
 
+async function collectUpdateTargetNodes(
+    this: TableTree<ITreeNode>,
+    filter: ITableFilter,
+    options: ITreeUpdateNodesOptions | undefined,
+    needStatsProjection: boolean,
+): Promise<IUpdateTargetNodes> {
+    // projection 只取后续流程需要的字段，普通内容更新无需读取完整节点。
+    const targetNodes = await this.findMany(filter, {
+        projection: needStatsProjection
+            ? ["id", "parentId", "index", "isDir", "size", "ctotal", "cftotal", "csize"]
+            : ["id", "parentId"],
+    })
+    if (targetNodes.length === 0) {
+        return { nodes: [], nodeIds: [], parentIds: [] }
+    }
+
+    const nodes = [...targetNodes]
+    if (options?.deep) {
+        // deep 更新只递归当前可见子树；已标记删除的后代不应被普通更新重新影响。
+        const childNodes = await collectDescendantNodes(this, targetNodes.map((node) => node.id), {
+            ignoreMarkDelete: true,
+        })
+        nodes.push(...childNodes)
+    }
+
+    return {
+        nodes,
+        nodeIds: Array.from(new Set(nodes.map((node) => node.id))),
+        parentIds: Array.from(new Set(nodes.map((node) => node.parentId))),
+    }
+}
+
 async function applyUpdateMetadataDelta(
     table: TableTree<ITreeNode>,
     oldNodes: ITreeNode[],
@@ -83,6 +123,7 @@ async function applyUpdateMetadataDelta(
 ): Promise<void> {
     const deltas: ITreeMetadataStatsDelta[] = []
     for (const oldNode of oldNodes) {
+        // 用更新前节点和 $set 后节点分别计算对父级的贡献，再取差值作为 metadata 增量。
         const nextNode = resolveUpdatedStatsNode(oldNode, setOp)
         const oldContribution = calcTreeNodeContribution(oldNode)
         const nextContribution = calcTreeNodeContribution(nextNode)
@@ -90,6 +131,7 @@ async function applyUpdateMetadataDelta(
         const indexChanged = setOp && Object.prototype.hasOwnProperty.call(setOp, "index")
 
         if (parentChanged) {
+            // 跨父级移动需要从旧父级扣减，再向新父级增加，并刷新两边 childLastIndex。
             deltas.push({
                 parentId: oldNode.parentId,
                 ctotal: -oldContribution.ctotal,
@@ -139,6 +181,7 @@ async function assertUpdateOpSafe(
     options?: ITreeUpdateNodesOptions,
 ): Promise<void> {
     const setOp = updateOp.$set as Record<string, any> | undefined
+    // 先做算子级安全检查，保证不会通过 $unset/$rename/$min 等绕过树结构保护。
     assertTreeStructureFieldsSafe(updateOp)
     if (!setOp) return
 
@@ -150,6 +193,7 @@ async function assertUpdateOpSafe(
         if (options?.deep) {
             throw new Error("[TableTree] deep 更新不能同时修改 parentId，避免后代节点被平铺移动")
         }
+        // 批量移动不能同时命中父节点和后代，否则会把后代一起改成目标父级，破坏原子树结构。
         await assertNoSelectedAncestorAndDescendant.call(this, updateNodeIds)
         await assertTreeParentExists(this, setOp.parentId)
         await assertNotMoveIntoSelfOrDescendant(this, updateNodeIds, setOp.parentId)

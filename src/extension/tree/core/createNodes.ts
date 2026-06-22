@@ -23,10 +23,17 @@ export interface ITreeCreateResult {
     newNodes?: ITreeNode[]
 }
 
-/** 创建节点
+/**
+ * 创建节点
  *
- * 在指定的父节点下批量创建新节点。
- * 所有创建的节点都将自动归属到指定的 parentId 下。
+ * 在指定父级下批量插入新节点，并维护目录树需要的排序和统计字段。
+ *
+ * 核心流程：
+ * 1. 先校验父级是否存在，避免写入孤儿节点。
+ * 2. 将外部传入的 Partial 节点归一化为完整可写节点，并统一本次操作的 modif。
+ * 3. 根据显式 index 选项或父级当前排序状态，为缺少 index 的节点补齐排序值。
+ * 4. 调用底层 insertMany 写入；如果遇到重复 ID，底层会跳过，所以后续只处理实际插入成功的节点。
+ * 5. 用实际插入节点的贡献量增量刷新父级及祖先 metadata，并按需触发 index 智能重排。
  *
  */
 export async function createNodes(
@@ -40,10 +47,12 @@ export async function createNodes(
     if (nodes.length === 0) {
         return { createdNodeIds: [], newNodes: options?.returnNewNodes ? [] : undefined }
     }
+
+    // 创建操作只能挂到已存在父级或根节点下；批量 setNodes 才支持同批次创建父子节点。
     await assertTreeParentExists(this, parentId)
 
     const modif = Date.now()
-    const newNodes = nodes.map((node, index) => {
+    const newNodes = nodes.map((node) => {
         return normalizeWritableNode(node, {
             parentId,
             modif,
@@ -51,11 +60,13 @@ export async function createNodes(
     })
 
     if (options?.index) {
+        // 调用方显式指定插入位置时，整批新节点按该位置连续生成 index。
         const indexes = await resolveTreeIndexes(this, parentId, newNodes.length, options.index)
         for (let i = 0; i < newNodes.length; i++) {
             newNodes[i].index = indexes[i]
         }
     } else {
+        // 未显式指定时保留调用方已有 index，只给缺失 index 的节点补默认排序值。
         const nodesNeedIndex = newNodes.filter((node) => !node.index)
         if (nodesNeedIndex.length > 0) {
             const indexes = await resolveTreeIndexes(this, parentId, nodesNeedIndex.length)
@@ -68,6 +79,8 @@ export async function createNodes(
     const result = await this.insertMany(newNodes)
     const insertedNodeSet = new Set(result.insertedIds)
     const insertedNodes = collectInsertedNodes(newNodes, insertedNodeSet)
+
+    // 只用实际插入成功的节点刷新 metadata，避免重复 ID 被跳过后仍错误增加父级统计。
     await applyTreeMetadataDelta(this, insertedNodes.map((node) => ({
         parentId,
         ...calcTreeNodeContribution(node),

@@ -22,9 +22,16 @@ export interface ITreeDeleteResult {
 /**
  * 删除节点
  *
- * 子节点也会被递归删除
+ * 删除指定节点及其全部后代。
+ *
+ * 核心流程：
+ * 1. 去重输入 ID，并读取这些节点连同所有后代，确保目录删除会覆盖整棵子树。
+ * 2. 计算“最外层被删除节点”，父子同时删除时只用父节点扣减 metadata，避免后代重复扣减。
+ * 3. 根据 TableTree 的标记删除配置选择物理删除或软删除；软删除会写入统一 modif。
+ * 4. 用最外层节点对父级的贡献量做负增量，刷新父级及祖先的统计和 childLastIndex。
+ *
  * 要注意递归删除可能会导致性能问题，尤其是当删除的节点有大量子孙节点时。
- * 
+ *
  */
 export async function deleteNodes(
     this: TableTree<ITreeNode>,
@@ -46,11 +53,13 @@ export async function deleteNodes(
     }
 
     const deleteIds = nodes.map((node) => node.id)
+    // 只统计可见树中真正从父级“消失”的入口节点，防止父子混合输入导致重复扣减。
     const topDeletedNodes = collectTopDeletedNodes(nodes)
     const modif = Date.now()
 
     const shouldRealDelete = options?.realDelete === true || this.options?.enableMarkDelete !== true
     if (shouldRealDelete) {
+        // 物理删除要允许读取已标记删除记录，否则 realDelete 无法清理之前软删过的节点。
         await this.deleteMany({ id: { $in: deleteIds } }, { realDelete: true, readDelete: true } as any)
     } else {
         await this.updateMany(

@@ -5,8 +5,8 @@ import { resolveOverwriteNodes } from "../util/resolveOverwriteNodes"
 import { rebalanceTreeIndexes } from "../util/rebalanceTreeIndexes"
 import { assertNotMoveIntoSelfOrDescendant, assertTreeParentExists } from "../util/assertTreeParent"
 import { refreshTreeMetadata } from "../util/refreshTreeMetadata"
-import { repairDuplicatedSiblingNames } from "../util/repairDuplicatedSiblingNames"
-import { repairDuplicatedSiblingConflicts } from "../util/repairDuplicatedSiblingConflicts"
+import { collectTopSelectedNodes } from "../util/collectTopSelectedNodes"
+import { repairTreeOverwriteConflicts } from "../util/repairTreeOverwriteConflicts"
 
 /** 移动节点选项 */
 export interface ITreeMoveNodesOptions extends ITreeOverwriteOptions {
@@ -23,9 +23,18 @@ interface IApplyMoveOverwriteResult {
     modif?: number
 }
 
-/** 移动节点
+/**
+ * 移动节点
  *
- *  把目标节点移动到新的父节点下，遵循覆盖设置
+ * 把节点移动到新的父级下，并按覆盖策略处理目标父级中的冲突节点。
+ *
+ * 核心流程：
+ * 1. 去重输入 ID、校验目标父级，并过滤掉父子混合选择中的后代节点。
+ * 2. 先校验不会移动到自身或后代，避免形成父级环。
+ * 3. 按覆盖策略解析目标父级冲突：replace 删除冲突目标，skip 跳过来源，merge 递归合并目录。
+ * 4. 为仍需移动的节点分配目标父级下的新 index，并在写入前再次校验父级环。
+ * 5. 批量更新 parentId/index/modif，写入后再次检测并发造成的环；若发现坏状态立即回滚本次移动。
+ * 6. 重排目标父级 index，刷新新旧父级及祖先 metadata，并做并发冲突兜底修复。
  */
 export async function moveNodes(
     this: TableTree<ITreeNode>,
@@ -39,10 +48,8 @@ export async function moveNodes(
     if (uniqueNodeIds.length === 0) return {}
     await assertTreeParentExists(this, parentId)
 
-    const sourceNodes = (await Promise.all(uniqueNodeIds.map((nodeId) => this.get(nodeId)))).filter(
-        (node): node is ITreeNode => !!node,
-    )
-    const nodes = await filterNestedMoveRoots.call(this, sourceNodes)
+    // 批量移动父目录和后代时，只移动父目录；后代会随父目录天然保留在子树中。
+    const nodes = await collectTopSelectedNodes(this, uniqueNodeIds)
     if (nodes.length === 0) return {}
 
     await assertNotMoveIntoSelfOrDescendant(this, nodes.map((node) => node.id), parentId)
@@ -50,6 +57,7 @@ export async function moveNodes(
     const overwriteResult = await applyMoveOverwrite.call(this, nodes, parentId, options)
     const movableNodes = overwriteResult.nodes
     if (movableNodes.length === 0) {
+        // 覆盖策略可能只产生了删除或合并副作用；没有副作用时才返回空结果。
         if (!overwriteResult.hasChanged) return {}
         const modif = overwriteResult.modif ?? Date.now()
         return {
@@ -81,18 +89,7 @@ export async function moveNodes(
         parentIds: [parentId, ...oldParentIds],
         cmodif: modif,
     })
-    if (options?.overwriteMode === "newName" && (options.uniqueBy ?? "id") === "name") {
-        await repairDuplicatedSiblingNames(this, parentId, movableNodes.map((node) => node.id))
-    }
-    if (["replace", "skip", "merge", "mergeByModif"].includes(options?.overwriteMode ?? "replace")) {
-        await repairDuplicatedSiblingConflicts(
-            this,
-            parentId,
-            options?.uniqueBy ?? "id",
-            movableNodes.map((node) => node.id),
-            options?.overwriteMode ?? "replace",
-        )
-    }
+    await repairTreeOverwriteConflicts(this, parentId, movableNodes.map((node) => node.id), options)
 
     return {
         modif,
@@ -107,6 +104,7 @@ async function rollbackMoveIfCycleCreated(
     modif: number,
 ): Promise<void> {
     try {
+        // 写入后再校验一次，覆盖并发交叉移动导致的“校验后状态被别人改坏”的窗口。
         await assertNotMoveIntoSelfOrDescendant(this, oldNodes.map((node) => node.id), parentId)
     } catch (error) {
         // 并发交叉移动可能在写入后才形成父级环；必须回滚本次移动，不能把坏状态留给后续 metadata 刷新。
@@ -135,6 +133,7 @@ async function applyMoveOverwrite(
     parentId: string,
     options?: ITreeMoveNodesOptions,
 ): Promise<IApplyMoveOverwriteResult> {
+    // 移动时目标父级下可能已经有同 ID 或同 uniqueBy 节点；来源节点自身不应被当成冲突目标。
     const resolved = await resolveOverwriteNodes(this, parentId, nodes, {
         ...options,
         ignoreNodeIds: nodes.map((node) => node.id),
@@ -142,11 +141,13 @@ async function applyMoveOverwrite(
     let hasChanged = false
     let changedModif: number | undefined
     if (resolved.deleteNodeIds.length > 0) {
+        // replace 类策略会先删除目标冲突节点，后续再把来源节点移动过去。
         await this.deleteNodes(resolved.deleteNodeIds)
         hasChanged = true
         changedModif = Date.now()
     }
     for (const pair of resolved.mergePairs) {
+        // merge 策略保留目标目录，把来源目录的子节点递归迁入目标目录，最后删除来源目录。
         changedModif = await mergeMoveDir.call(this, pair.sourceNode, pair.targetNode, options) ?? changedModif
         hasChanged = true
     }
@@ -167,37 +168,11 @@ async function mergeMoveDir(
     let changedModif: number | undefined
     const children = await this.findMany({ parentId: sourceNode.id }, { sort: { index: 1 } })
     if (children.length > 0) {
+        // 递归调用 moveNodes 复用覆盖策略和 metadata 维护逻辑，避免 merge 自己维护一套规则。
         const result = await this.moveNodes(children.map((child) => child.id), targetNode.id, options)
         changedModif = result.cmodif ?? result.modif
     }
     await this.deleteNodes([sourceNode.id])
     const target = await this.get(targetNode.id)
     return target?.cmodif ?? changedModif
-}
-
-async function filterNestedMoveRoots(
-    this: TableTree<ITreeNode>,
-    nodes: ITreeNode[],
-): Promise<ITreeNode[]> {
-    const selectedIds = new Set(nodes.map((node) => node.id))
-    const roots: ITreeNode[] = []
-
-    for (const node of nodes) {
-        let parentId = node.parentId
-        let hasSelectedAncestor = false
-        while (parentId && parentId !== "/") {
-            if (selectedIds.has(parentId)) {
-                hasSelectedAncestor = true
-                break
-            }
-            const parentNode = await this.get(parentId, { ignoreMarkDelete: true })
-            parentId = parentNode?.parentId ?? "/"
-        }
-        // 批量移动时如果父目录已被选中，子节点会随父目录一起移动，不应再被单独平铺移动。
-        if (!hasSelectedAncestor) {
-            roots.push(node)
-        }
-    }
-
-    return roots
 }

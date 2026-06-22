@@ -8,8 +8,9 @@ import { resolveOverwriteNodes, type IResolveOverwriteNodesResult } from "../uti
 import { rebalanceTreeIndexes } from "../util/rebalanceTreeIndexes"
 import { assertTreeParentExists } from "../util/assertTreeParent"
 import { collectDescendantNodes } from "../util/collectDescendantNodes"
-import { repairDuplicatedSiblingNames } from "../util/repairDuplicatedSiblingNames"
-import { repairDuplicatedSiblingConflicts } from "../util/repairDuplicatedSiblingConflicts"
+import { collectExistingParentIds } from "../util/collectExistingParentIds"
+import { groupNodesByParentId } from "../util/groupNodesByParentId"
+import { repairTreeOverwriteConflicts } from "../util/repairTreeOverwriteConflicts"
 
 /** 设置节点选项 */
 export type ITreeSetNodesOptions = ITreeOverwriteOptions & {
@@ -61,9 +62,11 @@ interface IApplySetOverwriteResult {
  * 流程：
  * 1. 生成本次写入统一使用的 modif。
  * 2. 按需执行 presync，并剥离只用于同步检查的 oldModif/oldCmodif。
- * 3. 根据覆盖策略解析最终要写入的节点，以及需要删除的冲突节点。
- * 4. 校验父节点、补齐排序索引，并写入节点数据。
- * 5. 重排受影响父级的 index，并刷新父级/祖先级 metadata。
+ * 3. updateOnly 模式先过滤不可见或不存在的节点，避免把缺失节点误创建回来。
+ * 4. 根据覆盖策略解析最终要写入的节点、要删除的冲突节点，以及 merge 后要清理的来源目录。
+ * 5. 在任何真实写入前完成父级存在、批次重复 ID、最终父级环和排序锚点校验，尽量保证失败时不留下半写入。
+ * 6. 写入前记录旧父级，写入后重排受影响父级 index，并刷新新旧父级及祖先 metadata。
+ * 7. 最后执行并发冲突兜底修复，让多用户同时写入同一父级时最终仍收敛到覆盖策略要求的状态。
  *
  * 要注意如果修改了节点的 parentId 需要触发相应的 metadata 变更，并且遵守 ITreeOverwriteOptions 覆盖设置和 index 规则
  */
@@ -78,14 +81,16 @@ export async function setNodes(
     }
 
     const modif = Date.now()
+    // presync 只用于把客户端旧版本状态带回给调用方，不影响本次写入是否继续执行。
     const presyncResult = await collectSetPresyncResult.call(this, nodes, options)
     const writableNodes = prepareWritableNodes(nodes, modif)
     const visibleWritableNodes = await filterUpdateOnlyVisibleNodes.call(this, writableNodes, options)
     assertNoBatchDuplicateNodeConflicts(visibleWritableNodes)
 
     // 先记录原父级，用于 parentId 被修改后刷新旧父级和旧祖先链的统计字段。
-    const oldParentIds = await collectExistingParentIds.call(this, visibleWritableNodes)
+    const oldParentIds = await collectExistingParentIds(this, visibleWritableNodes)
 
+    // 覆盖策略可能把来源节点映射为目标 ID，或跳过/合并部分子树；后续所有校验都基于解析后的最终写入计划。
     const overwriteResult = await applySetOverwrite.call(this, visibleWritableNodes, options)
     const resolvedNodes = overwriteResult.nodes
     assertNoBatchDuplicateNodeConflicts(resolvedNodes)
@@ -94,6 +99,7 @@ export async function setNodes(
     }
     const nodesByParentId = groupNodesByParentId(resolvedNodes)
 
+    // 父级、父级环和 index 锚点都必须在删除冲突目标之前校验，避免后续失败时破坏已有树。
     await assertSetNodeParents.call(this, resolvedNodes, nodesByParentId)
     await assertSetNodeParentMoves.call(this, resolvedNodes)
 
@@ -104,6 +110,7 @@ export async function setNodes(
         : []
 
     if (overwriteResult.deletedNodeIds.length > 0) {
+        // 覆盖策略确认要删除的目标节点，此时所有前置校验已通过，可以安全产生副作用。
         await this.deleteNodes(overwriteResult.deletedNodeIds)
     }
     await this.setMany(resolvedNodes, resolveSetManyOptions(options))
@@ -116,6 +123,7 @@ export async function setNodes(
         )
     }
     if (overwriteResult.mergedSourceNodeIds.length > 0) {
+        // merge 保留目标目录并迁移来源子树，写入完成后来源目录本身需要被删除。
         await this.deleteNodes(overwriteResult.mergedSourceNodeIds)
     }
     await refreshTreeMetadata(this, {
@@ -123,21 +131,9 @@ export async function setNodes(
         statIds: resolvedNodes.filter((node) => node.isDir).map((node) => node.id),
         cmodif: modif,
     })
-    if (options?.overwriteMode === "newName" && (options.uniqueBy ?? "id") === "name") {
-        for (const [parentId, parentNodes] of nodesByParentId) {
-            await repairDuplicatedSiblingNames(this, parentId, parentNodes.map((node) => node.id))
-        }
-    }
-    if (["replace", "skip", "merge", "mergeByModif"].includes(options?.overwriteMode ?? "replace")) {
-        for (const [parentId, parentNodes] of nodesByParentId) {
-            await repairDuplicatedSiblingConflicts(
-                this,
-                parentId,
-                options?.uniqueBy ?? "id",
-                parentNodes.map((node) => node.id),
-                options?.overwriteMode ?? "replace",
-            )
-        }
+    for (const [parentId, parentNodes] of nodesByParentId) {
+        // 多用户并发写入可能同时生成相同名称或唯一键，最后按覆盖策略再收敛一次。
+        await repairTreeOverwriteConflicts(this, parentId, parentNodes.map((node) => node.id), options)
     }
 
     const result: ITreeSetNodesResult = {
@@ -385,6 +381,8 @@ async function applySetOverwrite(
     nodes: ITreeNode[],
     options?: ITreeSetNodesOptions,
 ): Promise<IApplySetOverwriteResult> {
+    // 这个循环按父级逐层解析覆盖策略。merge 会把来源目录的子节点改挂到目标目录，
+    // 因此可能产生新的待处理节点，直到所有层级的冲突都被解析完。
     const nextNodes: ITreeNode[] = []
     const deletedNodeIds: string[] = []
     const mergedSourceNodeIds: string[] = []
@@ -400,9 +398,11 @@ async function applySetOverwrite(
 
         for (const [parentId, parentNodes] of nodesByParentId) {
             if (processedMergeSourceIds.has(parentId)) {
+                // 来源目录已经被 merge 到目标目录，旧父级路径下的子节点不再继续写入。
                 continue
             }
             if (discardedBatchNodeIds.has(parentId)) {
+                // 父节点已被 skip/replace 丢弃，它的批次子树也必须一起丢弃，避免写入孤儿节点。
                 for (const node of parentNodes) {
                     discardedBatchNodeIds.add(node.id)
                 }
@@ -416,6 +416,7 @@ async function applySetOverwrite(
 
             for (const pair of resolved.replacePairs) {
                 if (pair.sourceNode.id !== pair.targetNode.id) {
+                    // replace 复用目标 ID 后，本批次来源目录的子节点也要跟着挂到目标 ID 下。
                     replacedSourceIdByTargetId.set(pair.sourceNode.id, pair.targetNode.id)
                 }
                 if (pair.sourceNode.isDir && discardedBatchNodeIds.has(pair.sourceNode.id)) {
@@ -661,17 +662,6 @@ function resolveConflictTargetUpdate(sourceNode: ITreeNode, targetNode: ITreeNod
     }
 }
 
-/** 按 parentId 分组节点，便于覆盖策略、父级校验和索引计算按同级节点批量处理。 */
-function groupNodesByParentId(nodes: ITreeNode[]): Map<string, ITreeNode[]> {
-    const nodesByParentId = new Map<string, ITreeNode[]>()
-    for (const node of nodes) {
-        const list = nodesByParentId.get(node.parentId) ?? []
-        list.push(node)
-        nodesByParentId.set(node.parentId, list)
-    }
-    return nodesByParentId
-}
-
 /** 生成 merge 冲突场景下的目标目录更新数据，mergeByModif 会保留更新的目标目录字段。 */
 function resolveMergeTargetUpdate(
     sourceNode: ITreeNode,
@@ -689,16 +679,4 @@ function resolveMergeTargetUpdate(
         index: targetNode.index,
         name: targetNode.name,
     }
-}
-
-/** 收集写入前节点所在的旧父级，用于节点移动后刷新旧父级及其祖先的统计信息。 */
-async function collectExistingParentIds(this: TableTree<ITreeNode>, nodes: ITreeNode[]): Promise<string[]> {
-    const parentIds = new Set<string>()
-    for (const node of nodes) {
-        const oldNode = await this.get(node.id, { ignoreMarkDelete: true })
-        if (oldNode?.parentId) {
-            parentIds.add(oldNode.parentId)
-        }
-    }
-    return Array.from(parentIds)
 }

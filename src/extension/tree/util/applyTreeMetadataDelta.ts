@@ -1,6 +1,7 @@
 import type { TableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
 import { collectAncestorIds } from "./collectAncestorIds"
+import { setTreeNumberStat } from "./setTreeNumberStat"
 
 export interface ITreeMetadataStatsDelta {
     /** 直接受影响的父级，增量会沿着该父级的祖先链向上应用。 */
@@ -127,9 +128,9 @@ async function calcDeltaUpdateOp<TNode extends ITreeNode>(
     const $set: Record<string, any> = {}
     const $unset: Record<string, true> = {}
 
-    setNumberStat($set, $unset, "ctotal", nextStats.ctotal)
-    setNumberStat($set, $unset, "cftotal", nextStats.cftotal)
-    setNumberStat($set, $unset, "csize", nextStats.csize)
+    setTreeNumberStat($set, $unset, "ctotal", nextStats.ctotal)
+    setTreeNumberStat($set, $unset, "cftotal", nextStats.cftotal)
+    setTreeNumberStat($set, $unset, "csize", nextStats.csize)
 
     const nextChildLastIndex = await resolveNextChildLastIndex(table, node, delta)
     if (nextChildLastIndex) {
@@ -168,17 +169,4 @@ async function resolveNextChildLastIndex<TNode extends ITreeNode>(
         }
     }
     return childLastIndex
-}
-
-function setNumberStat(
-    $set: Record<string, any>,
-    $unset: Record<string, true>,
-    key: "ctotal" | "cftotal" | "csize",
-    value: number,
-) {
-    if (value > 0) {
-        $set[key] = value
-    } else {
-        $unset[key] = true
-    }
 }

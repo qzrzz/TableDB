@@ -6,6 +6,7 @@ import { normalizeWritableNode } from "../util/normalizeWritableNode"
 import { assertTreeParentExists } from "../util/assertTreeParent"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
 import { repairDuplicatedSiblingNames } from "../util/repairDuplicatedSiblingNames"
+import { collectTopSelectedNodes } from "../util/collectTopSelectedNodes"
 
 /** 复制节点选项 */
 export type ITreeCopyNodesOptions = ITreeOverwriteOptions & {
@@ -24,9 +25,18 @@ export interface ITreeCopyResult {
     createdNodeIds: string[]
 }
 
-/** 复制节点
+/**
+ * 复制节点
  *
- * 把已经存在的节点复制，会安排新的节点 ID。
+ * 将已存在节点复制到目标父级，并为复制出的每个节点生成新的 ID。
+ *
+ * 核心流程：
+ * 1. 去重并读取源节点，父子混合选择时只保留最外层源节点，避免子节点被重复复制。
+ * 2. 按 renameOnCopy 规则为顶层副本预生成名称；默认复制到同级时自动避让重名。
+ * 3. 递归构造待写入节点列表，deep 模式下复制整棵子树，所有副本共享本次复制的 modif。
+ * 4. 只给顶层副本计算目标父级下的 index，子节点在各自新父级下保持构造顺序。
+ * 5. 交给 setNodes 统一处理覆盖策略、metadata、标记删除恢复和最终写入。
+ * 6. 返回仍然可见的顶层副本 ID；如果覆盖策略跳过了某些副本，它们不会出现在结果里。
  *
  */
 export async function copyNodes(
@@ -41,16 +51,17 @@ export async function copyNodes(
     if (uniqueNodeIds.length === 0) {
         return { createdNodeIds: [] }
     }
+
+    // 复制的目标位置必须已经存在；复制过程中产生的新子节点会挂到新副本父级下。
     await assertTreeParentExists(this, parentId)
 
-    const sourceNodes = (await Promise.all(uniqueNodeIds.map((nodeId) => this.get(nodeId)))).filter(
-        (node): node is ITreeNode => !!node,
-    )
-    const rootNodes = await filterNestedCopyRoots.call(this, sourceNodes)
+    // 父目录和子节点同时被选中时，复制父目录已经包含子节点，不再单独复制子节点。
+    const rootNodes = await collectTopSelectedNodes(this, uniqueNodeIds)
     if (rootNodes.length === 0) {
         return { createdNodeIds: [] }
     }
 
+    // 默认复制行为倾向于“生成副本”而不是覆盖原节点，因此未指定覆盖策略时自动重命名。
     const shouldRenameOnCopy = options?.renameOnCopy === true || (!options?.overwriteMode && options?.renameOnCopy !== false)
     const rootNames = shouldRenameOnCopy
         ? await createCopyNames.call(this, parentId, rootNodes.map((node) => node.name))
@@ -73,6 +84,7 @@ export async function copyNodes(
     const { index, ...setOptions } = options ?? {}
     await this.setNodes(copyNodes, setOptions)
     if (shouldRenameOnCopy) {
+        // 多用户同时复制时，预先生成的名称仍可能冲突，写入后再做一次兜底修复。
         await repairDuplicatedSiblingNames(this, parentId, createdNodeIds)
     }
     const existingRootIds: string[] = []
@@ -115,32 +127,6 @@ async function buildCopyNodes(
     }
 
     return copiedId
-}
-
-async function filterNestedCopyRoots(
-    this: TableTree<ITreeNode>,
-    nodes: ITreeNode[],
-): Promise<ITreeNode[]> {
-    const selectedIds = new Set(nodes.map((node) => node.id))
-    const roots: ITreeNode[] = []
-
-    for (const node of nodes) {
-        let parentId = node.parentId
-        let hasSelectedAncestor = false
-        while (parentId && parentId !== "/") {
-            if (selectedIds.has(parentId)) {
-                hasSelectedAncestor = true
-                break
-            }
-            const parentNode = await this.get(parentId, { ignoreMarkDelete: true })
-            parentId = parentNode?.parentId ?? "/"
-        }
-        if (!hasSelectedAncestor) {
-            roots.push(node)
-        }
-    }
-
-    return roots
 }
 
 async function createCopyNames(
