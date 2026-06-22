@@ -1,6 +1,6 @@
 {
     "name": "tbdb",
-    "version": "0.0.3",
+    "version": "0.0.5",
     "type": "module",
     "exports": {
         ".": {
@@ -13,7 +13,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "rslib build",
+        "build": "rslib build && npm run docs:build",
         "dev": "rslib build --watch",
         "test": "vitest",
         "bench:tree": "node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
