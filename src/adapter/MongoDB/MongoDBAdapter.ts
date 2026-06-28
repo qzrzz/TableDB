@@ -19,7 +19,7 @@ import { Collection } from "mongodb"
 import { jsToMongo, mongoToJs } from "./lib/docType"
 import { buildProjection } from "./lib/normalizeProjection"
 import { normalizeSort } from "./lib/normalizeSort"
-import { isPlainObject } from "fzz/src"
+import { isPlainObject } from "fzz"
 
 export function MongoDBAdapter(config: { auth: string; dbName: string }) {
     const Adapter = {

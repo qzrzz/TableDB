@@ -1,8 +1,21 @@
-import { existsSync, readFileSync, renameSync, unlinkSync } from "fs"
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
 import { resolve } from "path"
-import { compress, decompress } from "zstd-napi"
-import { writeFileSync } from "fs"
+import { createRequire } from "module"
 import type { ISqliteDatabase } from "../driver/types"
+
+const require = createRequire(import.meta.url)
+
+let zstdCache: any = null
+function getZstd() {
+    if (!zstdCache) {
+        try {
+            zstdCache = require("zstd-napi")
+        } catch (e) {
+            throw new Error("[SQLiteAdapter] 无法加载可选依赖 zstd-napi，请确保该依赖已正确安装和编译。错误信息: " + (e as Error).message)
+        }
+    }
+    return zstdCache
+}
 
 /**
  * 检查文件是否为 ZSTD 压缩文件 (Magic Number: 0xFD2FB528)
@@ -36,7 +49,7 @@ export function checkAndDecompressDb(filename: string): void {
             const compressedBuf = readFileSync(resolvedPath)
 
             // Decompress
-            const decompressedBuf = decompress(compressedBuf)
+            const decompressedBuf = getZstd().decompress(compressedBuf)
 
             // Write decompressed data to tmp file
             writeFileSync(tmpFile, decompressedBuf)
@@ -70,7 +83,7 @@ export function compressFile(filename: string) {
 
         // Compress
         // Default level is usually fine (3), can pass second arg { level: 3 }
-        const compressedBuf = compress(sourceBuf)
+        const compressedBuf = getZstd().compress(sourceBuf)
 
         // Write compressed data to tmp file
         writeFileSync(tmpFile, compressedBuf)
