@@ -1,6 +1,6 @@
 {
     "name": "tbdb",
-    "version": "0.0.5",
+    "version": "0.0.6",
     "type": "module",
     "exports": {
         ".": {
@@ -12,6 +12,8 @@
     "files": [
         "dist"
     ],
+    "repository": "https://github.com/qzrzz/TableDB.git",
+    "homepage": "https://github.com/qzrzz/TableDB",
     "scripts": {
         "build": "rslib build && npm run docs:build",
         "dev": "rslib build --watch",
