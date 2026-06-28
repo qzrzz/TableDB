@@ -17,6 +17,8 @@ import type {
     ISqliteDriverConfig,
 } from "./types"
 
+import { createRequire } from "node:module"
+
 // bun:sqlite 类型定义
 interface BunSqliteStatement {
     all(...params: any[]): any[]
@@ -74,6 +76,7 @@ export class BunSqliteDriver implements ISqliteDatabase {
         // 动态导入 bun:sqlite
         let sqlite: { Database: new (filename: string) => BunSqliteDatabase }
         try {
+            const require = createRequire(import.meta.url)
             // @ts-ignore - bun:sqlite 是 Bun 特有模块
             sqlite = require("bun:sqlite")
         } catch (e) {
