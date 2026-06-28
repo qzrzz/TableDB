@@ -1,4 +1,4 @@
-import { Document } from "mongodb"
+import type { Document } from "mongodb"
 
 /** 规范化投影参数（仅转换格式，不处理 _id） */
 export function normalizeProjection(proj?: string[] | Record<string, 1 | -1>): Document | undefined {

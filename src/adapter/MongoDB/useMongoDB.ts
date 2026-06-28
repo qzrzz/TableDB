@@ -1,8 +1,12 @@
 import { useOfArgs } from "fzz"
-import { MongoClient, Collection, UUID } from "mongodb"
+import { createRequire } from "module"
+import type { MongoClient as IMongoClient, Collection, UUID } from "mongodb"
+
+const require = createRequire(import.meta.url)
 
 export const useMongoDB = useOfArgs(async (config: { auth: string; dbName: string }) => {
-    let mongodbClient = new MongoClient(config?.auth || "mongodb://localhost:27017")
+    const mongodb = require("mongodb")
+    let mongodbClient = new mongodb.MongoClient(config?.auth || "mongodb://localhost:27017")
     await mongodbClient.connect()
 
     let mongodbDB = mongodbClient.db(config?.dbName || "testdb")

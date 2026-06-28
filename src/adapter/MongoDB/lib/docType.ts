@@ -1,5 +1,51 @@
-import { Binary, Decimal128, Document, UUID, ObjectId } from "mongodb"
+import { createRequire } from "module"
+import type { Binary as IBinary, Decimal128 as IDecimal128, Document, UUID as IUUID, ObjectId as IObjectId } from "mongodb"
 import { ITableValue } from "../../../core/types"
+
+const require = createRequire(import.meta.url)
+let mongoModule: any = null
+function getMongo() {
+    if (!mongoModule) {
+        mongoModule = require("mongodb")
+    }
+    return mongoModule
+}
+
+function createMongoClassProxy(className: string) {
+    return new Proxy(class {}, {
+        get(target, prop) {
+            if (prop === Symbol.hasInstance) {
+                return (instance: any) => {
+                    try {
+                        const actualClass = getMongo()[className]
+                        return actualClass && instance instanceof actualClass
+                    } catch {
+                        return false
+                    }
+                }
+            }
+            const actualClass = getMongo()[className]
+            if (!actualClass) return undefined
+            const val = Reflect.get(actualClass, prop)
+            if (typeof val === "function") {
+                return val.bind(actualClass)
+            }
+            return val
+        },
+        construct(target, argumentsList) {
+            const actualClass = getMongo()[className]
+            if (!actualClass) {
+                throw new Error(`[MongoDBAdapter] Class ${className} is not found in mongodb module`)
+            }
+            return Reflect.construct(actualClass, argumentsList)
+        }
+    }) as any
+}
+
+const Binary = createMongoClassProxy("Binary")
+const Decimal128 = createMongoClassProxy("Decimal128")
+const UUID = createMongoClassProxy("UUID")
+const ObjectId = createMongoClassProxy("ObjectId")
 
 // 支持的 TypedArray 构造函数映射
 const TypedArrayMap: Record<string, any> = {
@@ -235,14 +281,14 @@ export function mongoToJs(data: any): ITableValue {
         if (__type === "bigint") return BigInt(val)
 
         if (__type === "DataView") {
-            const bin = val as Binary
+            const bin = val as IBinary
             const nodeBuf = bin.buffer
             const arrayBufferCopy = nodeBuf.buffer.slice(nodeBuf.byteOffset, nodeBuf.byteOffset + nodeBuf.byteLength)
             return new DataView(arrayBufferCopy)
         }
 
         if (__type === "ArrayBuffer") {
-            const bin = val as Binary
+            const bin = val as IBinary
             const nodeBuf = bin.buffer as Buffer
             // 强制转换为 ArrayBuffer，避免 SharedArrayBuffer 类型
             const ab = nodeBuf.buffer.slice(nodeBuf.byteOffset, nodeBuf.byteOffset + nodeBuf.byteLength)
@@ -261,7 +307,7 @@ export function mongoToJs(data: any): ITableValue {
         // 还原特定的 TypedArray
         const TypedArray = TypedArrayMap[__type]
         if (TypedArray) {
-            const bin = val as Binary
+            const bin = val as IBinary
             // 1. 获取 Node.js Buffer (Binary 包装内部的 buffer)
             const nodeBuf = bin.buffer
 
@@ -273,7 +319,7 @@ export function mongoToJs(data: any): ITableValue {
         }
 
         if (__type === "Blob") {
-            const bin = val as Binary
+            const bin = val as IBinary
             const nodeBuf = bin.buffer as Buffer
             const ab = nodeBuf.buffer.slice(nodeBuf.byteOffset, nodeBuf.byteOffset + nodeBuf.byteLength)
             // 保证 arrBuf 为 ArrayBuffer 类型

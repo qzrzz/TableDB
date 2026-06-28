@@ -15,7 +15,7 @@ import {
 } from "../adapter"
 import { ITableFilter, ITableUpdateOp } from "../../core/types"
 import { useMongoDB } from "./useMongoDB"
-import { Collection } from "mongodb"
+import type { Collection } from "mongodb"
 import { jsToMongo, mongoToJs } from "./lib/docType"
 import { buildProjection } from "./lib/normalizeProjection"
 import { normalizeSort } from "./lib/normalizeSort"

@@ -1,4 +1,4 @@
-import { Sort } from "mongodb"
+import type { Sort } from "mongodb"
 
 /** 规范化排序参数 */
 export function normalizeSort(sort?: string[] | Record<string, 1 | -1>): Sort | undefined {

@@ -10,7 +10,7 @@
         "better-sqlite3": "12.6.0",
         "es-toolkit": "1.43.0",
         "fzz": "*",
-        "indexless": "1.0.0",
+        "indexless": "1.0.2",
         "mongodb": "7.0.0",
         "vitest": "4.0.16",
         "zstd-napi": "0.0.12",
@@ -399,7 +399,7 @@
 
     "immediate": ["immediate@3.0.6", "https://registry.npmmirror.com/immediate/-/immediate-3.0.6.tgz", {}, "sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ=="],
 
-    "indexless": ["indexless@1.0.0", "https://registry.npmmirror.com/indexless/-/indexless-1.0.0.tgz", {}, "sha512-pnZVWl47FlUBQ5OyUbFoe6ZOd3QzPm8OkjsauO2TzjugiAcDQ00tukUuIFG0R3UFx7sCb02DHe4cK3L3crsHKA=="],
+    "indexless": ["indexless@1.0.2", "https://registry.npmmirror.com/indexless/-/indexless-1.0.2.tgz", {}, "sha512-QKXDX136NH2PwRVyWRsOZjbxxbASpKSGZF7lLYInoonXpwm8bsqNSmLlsiXg51yYs/Zt9gIu8uczyH7rw/F/nA=="],
 
     "inherits": ["inherits@2.0.4", "https://registry.npmmirror.com/inherits/-/inherits-2.0.4.tgz", {}, "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="],
 
