@@ -113,6 +113,7 @@ export interface SQLiteAdapterConfig {
 export function SQLiteAdapter(config: SQLiteAdapterConfig): ITableDBAdapter {
     let db: ISqliteDatabase
     let driverType: SqliteDriverType
+    const writeQueue = new WriteQueue()
 
     function getDb() {
         if (!db) {
@@ -175,7 +176,7 @@ export function SQLiteAdapter(config: SQLiteAdapterConfig): ITableDBAdapter {
         name: "SQLiteAdapter",
         async useAdapterInstance(tableName: string): Promise<ITableDBAdapterInstance> {
             const database = getDb()
-            return new SQLiteAdapterInstance(database, tableName, config, driverType)
+            return new SQLiteAdapterInstance(database, tableName, config, driverType, writeQueue)
         },
     }
     return Adapter
@@ -222,6 +223,15 @@ function registerCustomFunctions(db: ISqliteDatabase) {
     })
 }
 
+class WriteQueue {
+    private promise = Promise.resolve();
+    async add<T>(fn: () => Promise<T>): Promise<T> {
+        const next = this.promise.then(fn);
+        this.promise = next.catch(() => {});
+        return next;
+    }
+}
+
 export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     name = "SQLiteAdapter"
     private statementCache = new Map<string, ISqliteStatement>()
@@ -233,11 +243,42 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     // bun:sqlite 不支持，因此需要强制使用纯 SQL 模式
     private supportsCustomFunctions: boolean
 
+    private async runInImmediateTransaction<T>(fn: () => Promise<T>): Promise<T> {
+        if (!this.config.multi) return fn()
+
+        let retries = 0
+        while (true) {
+            try {
+                this.db.prepare('BEGIN IMMEDIATE').run()
+                break
+            } catch (err: any) {
+                if ((err.code === 'SQLITE_BUSY' || err.message?.includes('database is locked')) && retries < 5) {
+                    retries++
+                    await new Promise(r => setTimeout(r, 10 + Math.random() * 40))
+                    continue
+                }
+                throw err
+            }
+        }
+
+        try {
+            const res = await fn()
+            this.db.prepare('COMMIT').run()
+            return res
+        } catch (err) {
+            try {
+                this.db.prepare('ROLLBACK').run()
+            } catch {}
+            throw err
+        }
+    }
+
     constructor(
         private db: ISqliteDatabase,
         private tableName: string,
         private config: SQLiteAdapterConfig,
         private driverType: SqliteDriverType = "better-sqlite3",
+        private writeQueue: WriteQueue,
     ) {
         // bun:sqlite 不支持自定义函数
         this.supportsCustomFunctions = driverType !== "bun:sqlite"
@@ -452,7 +493,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return fastDeserialize(row.data)
     }
 
-    async set(id: any, value: ITableDoc): Promise<void> {
+    async _set(id: any, value: ITableDoc): Promise<void> {
         const normalizedValue = this.normalizeUndefined(value)
         this.scanAndMarkDirty(normalizedValue)
         const sVal = await serialize(normalizedValue)
@@ -464,8 +505,24 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         ).run(String(id), JSON.stringify(sVal))
     }
 
-    async delete(id: any): Promise<void> {
+    async set(id: any, value: ITableDoc): Promise<void> {
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                await this._set(id, value)
+            })
+        })
+    }
+
+    async _delete(id: any): Promise<void> {
         this.getStatement(`DELETE FROM "${this.tableName}" WHERE id = ?`).run(String(id))
+    }
+
+    async delete(id: any): Promise<void> {
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                await this._delete(id)
+            })
+        })
     }
 
     async has(id: any): Promise<boolean> {
@@ -535,17 +592,37 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return res.count
     }
 
-    async clear(): Promise<void> {
+    async _clear(): Promise<void> {
         this.getStatement(`DELETE FROM "${this.tableName}"`).run()
     }
 
+    async clear(): Promise<void> {
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                await this._clear()
+            })
+        })
+    }
+
     async clearAll(): Promise<void> {
-        this.clear()
-        this.dropIndexes()
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                await this._clear()
+                await this._dropIndexes()
+            })
+        })
+    }
+
+    async _drop(): Promise<void> {
+        this.getStatement(`DROP TABLE IF EXISTS "${this.tableName}"`).run()
     }
 
     async drop(): Promise<void> {
-        this.getStatement(`DROP TABLE IF EXISTS "${this.tableName}"`).run()
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                await this._drop()
+            })
+        })
     }
 
     async close(): Promise<void> {
@@ -692,7 +769,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return docs[0]
     }
 
-    async updateMany(
+    async _updateMany(
         filter: ITableFilter,
         updateOp: ITableUpdateOp<ITableDoc>,
         options?: ITableUpdateOptions,
@@ -772,12 +849,16 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
         // 事务：批量执行更新
         if (updatesToApply.length > 0) {
-            const tx = this.db.transaction(() => {
+            const txBody = () => {
                 for (const update of updatesToApply) {
                     updateStmt.run(update.sDoc, update._id)
                     modifiedCount++
                 }
-            })
+            }
+            const tx = this.config.multi
+                ? this.db.transaction(txBody).immediate
+                : this.db.transaction(txBody)
+
             const tStart = performance.now()
             tx()
             const tEnd = performance.now()
@@ -812,55 +893,71 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 applyUpdate(newDoc, setOnInsertOp)
             }
 
-            await this.set(newDoc.id, newDoc)
+            await this._set(newDoc.id, newDoc)
             return { matchedCount: 0, modifiedCount: 0, upsertedIds: [newDoc.id] }
         }
 
         return { matchedCount, modifiedCount, upsertedIds: [] }
     }
 
+    async updateMany(
+        filter: ITableFilter,
+        updateOp: ITableUpdateOp<ITableDoc>,
+        options?: ITableUpdateOptions,
+    ): Promise<ITableUpdateResult> {
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                return this._updateMany(filter, updateOp, options)
+            })
+        })
+    }
+
     async bulkUpdate(
         updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[],
         options?: { debug?: ITableDebugResult },
     ): Promise<ITableUpdateResult> {
-        let matchedCount = 0
-        let modifiedCount = 0
-        const upsertedIds: any[] = []
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                let matchedCount = 0
+                let modifiedCount = 0
+                const upsertedIds: any[] = []
 
-        let debug: DebugCollector | undefined
-        if (options?.debug) debug = new DebugCollector(options.debug)
-        if (debug) debug.setPrepareTime()
+                let debug: DebugCollector | undefined
+                if (options?.debug) debug = new DebugCollector(options.debug)
+                if (debug) debug.setPrepareTime()
 
-        const tStart = performance.now()
-        // 此处无法使用事务包裹，因为 updateOne 内部可能含有异步逻辑
-        for (const item of updates) {
-            try {
-                const res = await this.updateOne(item.filter, item.updateOp, item.options)
-                matchedCount += res.matchedCount
-                modifiedCount += res.modifiedCount
-                if (res.upsertedIds) {
-                    upsertedIds.push(...res.upsertedIds)
+                const tStart = performance.now()
+                // 在 immediate 事务中执行，updateOne 内部改为调用非锁的 _updateOne
+                for (const item of updates) {
+                    try {
+                        const res = await this._updateOne(item.filter, item.updateOp, item.options)
+                        matchedCount += res.matchedCount
+                        modifiedCount += res.modifiedCount
+                        if (res.upsertedIds) {
+                            upsertedIds.push(...res.upsertedIds)
+                        }
+                    } catch (e) {
+                        console.error("bulkUpdate error:", e)
+                    }
                 }
-            } catch (e) {
-                console.error("bulkUpdate error:", e)
-            }
-        }
-        const tEnd = performance.now()
+                const tEnd = performance.now()
 
-        if (debug) {
-            debug.setDbExecTime(tEnd - tStart)
-            debug.finish()
-        }
+                if (debug) {
+                    debug.setDbExecTime(tEnd - tStart)
+                    debug.finish()
+                }
 
-        return { matchedCount, modifiedCount, upsertedIds: upsertedIds.length > 0 ? upsertedIds : undefined }
+                return { matchedCount, modifiedCount, upsertedIds: upsertedIds.length > 0 ? upsertedIds : undefined }
+            })
+        })
     }
 
     async bulkUpdateSync(
         updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[],
         options?: { debug?: ITableDebugResult },
     ): Promise<ITableUpdateResult> {
-        // ... (原逻辑保持不变)
-        let matchedCount = 0
+        return this.writeQueue.add(async () => {
+            let matchedCount = 0
         let modifiedCount = 0
         const upsertedIds: any[] = []
 
@@ -963,7 +1060,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
         const tExecStart = performance.now()
         // 2. 执行阶段 (事务中)
-        const bulkUpdateTx = this.db.transaction(() => {
+        const txBody = () => {
             const insertStmt = this.getStatement(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
 
             // 根据是否支持自定义函数选择不同的更新策略
@@ -990,63 +1087,68 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                                 modifiedCount++
                             } catch (insertErr) {
                                 // 忽略插入错误 (例如 ID 冲突)
-                            }
-                        }
-                    } catch (e) {
-                        console.error("bulkUpdateSync error:", e)
-                    }
-                }
-            } else {
-                // bun:sqlite 不支持 JsPatch，使用读取-修改-写回模式
-                const selectDataStmt = this.getStatement(`SELECT _id, data FROM "${this.tableName}" WHERE _id = ?`)
-                const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = ? WHERE _id = ?`)
+                              }
+                          }
+                      } catch (e) {
+                          console.error("bulkUpdateSync error:", e)
+                      }
+                  }
+              } else {
+                  // bun:sqlite 不支持 JsPatch，使用读取-修改-写回模式
+                  const selectDataStmt = this.getStatement(`SELECT _id, data FROM "${this.tableName}" WHERE _id = ?`)
+                  const updateStmt = this.getStatement(`UPDATE "${this.tableName}" SET data = ? WHERE _id = ?`)
 
-                for (const prepared of preparedUpdates) {
-                    try {
-                        const row = this.getStatement(prepared.selectSql).get(...prepared.params)
-                        if (row) {
-                            // 读取完整数据
-                            const fullRow = selectDataStmt.get((row as any)._id) as { _id: number; data: string }
-                            if (fullRow) {
-                                // 在内存中应用更新
-                                const doc = fastDeserialize(fullRow.data)
-                                const modified = applyUpdate(doc, prepared.normalizedOp)
-                                if (modified) {
-                                    const sDoc = JSON.stringify(serializeSync(doc))
-                                    updateStmt.run(sDoc, fullRow._id)
-                                }
-                                matchedCount++
-                                modifiedCount++
-                            }
-                        } else if (prepared.options?.upsert && prepared.sUpsertDoc && prepared.upsertId) {
-                            try {
-                                insertStmt.run(prepared.upsertId, prepared.sUpsertDoc)
-                                upsertedIds.push(prepared.upsertId)
-                                matchedCount++
-                                modifiedCount++
-                            } catch (insertErr) {
-                                // 忽略插入错误
-                            }
-                        }
-                    } catch (e) {
-                        console.error("bulkUpdateSync error:", e)
-                    }
-                }
-            }
-        })
+                  for (const prepared of preparedUpdates) {
+                      try {
+                          const row = this.getStatement(prepared.selectSql).get(...prepared.params)
+                          if (row) {
+                              // 读取完整数据
+                              const fullRow = selectDataStmt.get((row as any)._id) as { _id: number; data: string }
+                              if (fullRow) {
+                                  // 在内存中应用更新
+                                  const doc = fastDeserialize(fullRow.data)
+                                  const modified = applyUpdate(doc, prepared.normalizedOp)
+                                  if (modified) {
+                                      const sDoc = JSON.stringify(serializeSync(doc))
+                                      updateStmt.run(sDoc, fullRow._id)
+                                  }
+                                  matchedCount++
+                                  modifiedCount++
+                              }
+                          } else if (prepared.options?.upsert && prepared.sUpsertDoc && prepared.upsertId) {
+                              try {
+                                  insertStmt.run(prepared.upsertId, prepared.sUpsertDoc)
+                                  upsertedIds.push(prepared.upsertId)
+                                  matchedCount++
+                                  modifiedCount++
+                              } catch (insertErr) {
+                                  // 忽略插入错误
+                              }
+                          }
+                      } catch (e) {
+                          console.error("bulkUpdateSync error:", e)
+                      }
+                  }
+              }
+          }
 
-        bulkUpdateTx()
-        const tExecEnd = performance.now()
+          const bulkUpdateTx = this.config.multi
+              ? this.db.transaction(txBody).immediate
+              : this.db.transaction(txBody)
 
-        if (debug) {
-            debug.setDbExecTime(tExecEnd - tExecStart)
-            debug.finish()
-        }
+          bulkUpdateTx()
+          const tExecEnd = performance.now()
 
-        return { matchedCount, modifiedCount, upsertedIds: upsertedIds.length > 0 ? upsertedIds : undefined }
-    }
+          if (debug) {
+              debug.setDbExecTime(tExecEnd - tExecStart)
+              debug.finish()
+          }
 
-    async updateOne(
+          return { matchedCount, modifiedCount, upsertedIds: upsertedIds.length > 0 ? upsertedIds : undefined }
+      })
+  }
+
+    async _updateOne(
         filter: ITableFilter,
         updateOp: ITableUpdateOp<ITableDoc>,
         options?: ITableUpdateOptions,
@@ -1130,7 +1232,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 }
 
                 if (debug) debug.finish()
-                await this.set(newDoc.id, newDoc)
+                await this._set(newDoc.id, newDoc)
                 return { matchedCount: 0, modifiedCount: 0, upsertedIds: [newDoc.id] }
             }
             if (debug) debug.finish()
@@ -1164,30 +1266,44 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return { matchedCount: 1, modifiedCount, upsertedIds: [] }
     }
 
+    async updateOne(
+        filter: ITableFilter,
+        updateOp: ITableUpdateOp<ITableDoc>,
+        options?: ITableUpdateOptions,
+    ): Promise<ITableUpdateResult> {
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                return this._updateOne(filter, updateOp, options)
+            })
+        })
+    }
+
     private static BULK_IMPORT_THRESHOLD = 1000
 
     async insertMany(docs: ITableDoc[], options?: { debug?: ITableDebugResult }): Promise<ITableInsertResult> {
-        let debug: DebugCollector | undefined
-        if (options?.debug) debug = new DebugCollector(options.debug)
-        if (debug) debug.setPrepareTime()
+        return this.writeQueue.add(async () => {
+            let debug: DebugCollector | undefined
+            if (options?.debug) debug = new DebugCollector(options.debug)
+            if (debug) debug.setPrepareTime()
 
-        const shouldOptimize = docs.length >= SQLiteAdapterInstance.BULK_IMPORT_THRESHOLD && this.indexedFields.size > 0
+            const shouldOptimize = docs.length >= SQLiteAdapterInstance.BULK_IMPORT_THRESHOLD && this.indexedFields.size > 0
 
-        const tStart = performance.now()
-        let res: ITableInsertResult
-        if (shouldOptimize) {
-            res = await this.insertManyOptimized(docs)
-        } else {
-            res = await this.insertManyDefault(docs)
-        }
-        const tEnd = performance.now()
+            const tStart = performance.now()
+            let res: ITableInsertResult
+            if (shouldOptimize) {
+                res = await this.insertManyOptimized(docs)
+            } else {
+                res = await this.insertManyDefault(docs)
+            }
+            const tEnd = performance.now()
 
-        if (debug) {
-            options!.debug!.strategy = shouldOptimize ? ("BULK_OPT" as any) : "SQL"
-            debug.setDbExecTime(tEnd - tStart)
-            debug.finish()
-        }
-        return res
+            if (debug) {
+                options!.debug!.strategy = shouldOptimize ? ("BULK_OPT" as any) : "SQL"
+                debug.setDbExecTime(tEnd - tStart)
+                debug.finish()
+            }
+            return res
+        })
     }
 
     /**
@@ -1211,16 +1327,14 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             serializedInfo.push({ id: String(doc.id), data: JSON.stringify(sDoc) })
         }
 
-        const insertManyTx = this.db.transaction((items: { id: string; data: string }[]) => {
+        const txBody = (items: { id: string; data: string }[]) => {
             for (const item of items) {
                 try {
                     stmt.run(item.id, item.data)
                     result.insertedCount++
                     result.insertedIds.push(item.id)
                 } catch (err: any) {
-                    // 处理不同驱动的 UNIQUE 约束错误
-                    // better-sqlite3: err.code === "SQLITE_CONSTRAINT_PRIMARYKEY" 或 "SQLITE_CONSTRAINT_UNIQUE"
-                    // node:sqlite: err.code === "ERR_SQLITE_ERROR" 且 err.errcode === 2067 (SQLITE_CONSTRAINT)
+                    // 处理不同驱动的正约束错误
                     const isBetterSqliteConstraint =
                         err.code === "SQLITE_CONSTRAINT_PRIMARYKEY" || err.code === "SQLITE_CONSTRAINT_UNIQUE"
                     const isNodeSqliteConstraint =
@@ -1235,7 +1349,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                     }
                 }
             }
-        })
+        }
+
+        const insertManyTx = this.config.multi
+            ? this.db.transaction(txBody).immediate
+            : this.db.transaction(txBody)
 
         insertManyTx(serializedInfo)
         return result
@@ -1278,11 +1396,12 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async setMany(docs: Partial<ITableDoc>[], options?: ITableSetOptions): Promise<ITableSetResult> {
-        let debug: DebugCollector | undefined
-        if (options?.debug) debug = new DebugCollector(options.debug)
-        if (debug) debug.setPrepareTime()
+        return this.writeQueue.add(async () => {
+            let debug: DebugCollector | undefined
+            if (options?.debug) debug = new DebugCollector(options.debug)
+            if (debug) debug.setPrepareTime()
 
-        const result: ITableSetResult = {
+            const result: ITableSetResult = {
             insertedCount: 0,
             overwriteCount: 0,
             insertedIds: [],
@@ -1306,7 +1425,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         }
 
         const tStart = performance.now()
-        const setManyTx = this.db.transaction(() => {
+        const txBody = () => {
             const stmtCheck = this.getStatement(`SELECT data FROM "${this.tableName}" WHERE id = ?`)
             const stmtUpdate = this.getStatement(`UPDATE "${this.tableName}" SET data = ? WHERE id = ?`)
             const stmtInsert = this.getStatement(`INSERT INTO "${this.tableName}" (id, data) VALUES (?, ?)`)
@@ -1352,7 +1471,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                     result.insertedIds.push(id)
                 }
             }
-        })
+        }
+
+        const setManyTx = this.config.multi
+            ? this.db.transaction(txBody).immediate
+            : this.db.transaction(txBody)
 
         setManyTx()
         const tEnd = performance.now()
@@ -1362,9 +1485,10 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             debug.finish()
         }
         return result
-    }
+    })
+}
 
-    async deleteMany(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
+    async _deleteMany(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
         let debug: DebugCollector | undefined
         if (options?.debug) debug = new DebugCollector(options.debug)
 
@@ -1421,7 +1545,15 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return { deletedCount: Number(info.changes) }
     }
 
-    async deleteOne(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
+    async deleteMany(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                return this._deleteMany(filter, options)
+            })
+        })
+    }
+
+    async _deleteOne(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
         let debug: DebugCollector | undefined
         if (options?.debug) debug = new DebugCollector(options.debug)
 
@@ -1473,11 +1605,19 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return { deletedCount: 0 }
     }
 
+    async deleteOne(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                return this._deleteOne(filter, options)
+            })
+        })
+    }
+
     // --- Index Management ---
 
-    async defineIndexes(indexes: ITableIndexConfig[], options?: ITableDefineIndexesOptions): Promise<void> {
+    async _defineIndexes(indexes: ITableIndexConfig[], options?: ITableDefineIndexesOptions): Promise<void> {
         if (options?.rebuild) {
-            await this.dropIndexes()
+            await this._dropIndexes()
         }
 
         for (const idx of indexes) {
@@ -1515,6 +1655,14 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 this.createSideTableIndex(field)
             }
         }
+    }
+
+    async defineIndexes(indexes: ITableIndexConfig[], options?: ITableDefineIndexesOptions): Promise<void> {
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                await this._defineIndexes(indexes, options)
+            })
+        })
     }
 
     private getSideTableName(field: string): string {
@@ -1682,8 +1830,8 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         }
     }
 
-    async dropIndexes(): Promise<void> {
-        const dropTx = this.db.transaction(() => {
+    async _dropIndexes(): Promise<void> {
+        const dropTxFn = () => {
             const idxs = this.db
                 .prepare(
                     `SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND name NOT LIKE 'sqlite_autoindex%'`,
@@ -1698,12 +1846,28 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 this.dropSideTableIndex(field)
             }
             this.indexedFields.clear()
-        })
+        }
+
+        const dropTx = this.config.multi
+            ? this.db.transaction(dropTxFn).immediate
+            : this.db.transaction(dropTxFn)
         dropTx()
     }
 
-    async compact(): Promise<void> {
+    async dropIndexes(): Promise<void> {
+        return this.writeQueue.add(async () => {
+            await this._dropIndexes()
+        })
+    }
+
+    async _compact(): Promise<void> {
         this.getStatement("VACUUM").run()
+    }
+
+    async compact(): Promise<void> {
+        return this.writeQueue.add(async () => {
+            await this._compact()
+        })
     }
 }
 
