@@ -2,7 +2,7 @@ import { Bench } from "tinybench"
 import { createBenchTable, generateDoc, prepareTableData } from "./utils"
 
 async function run() {
-    const bench = new Bench({ time: 1000 })
+    const bench = new Bench({ time: 200 })
 
     // 准备数据
     const DATA_SIZE = 5000

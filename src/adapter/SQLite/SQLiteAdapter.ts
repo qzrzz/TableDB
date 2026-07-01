@@ -141,7 +141,7 @@ export function SQLiteAdapter(config: SQLiteAdapterConfig): ITableDBAdapter {
             const driverConfig = {
                 filename,
                 walMode: config.multi === true,
-                busyTimeout: config.multi ? 15000 : undefined,
+                busyTimeout: config.multi ? 10 : undefined,
                 synchronous,
             }
 
@@ -243,6 +243,8 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     // bun:sqlite 不支持，因此需要强制使用纯 SQL 模式
     private supportsCustomFunctions: boolean
 
+    private inTransaction = false
+
     private async runInImmediateTransaction<T>(fn: () => Promise<T>): Promise<T> {
         if (!this.config.multi) return fn()
 
@@ -252,9 +254,10 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                 this.db.prepare('BEGIN IMMEDIATE').run()
                 break
             } catch (err: any) {
-                if ((err.code === 'SQLITE_BUSY' || err.message?.includes('database is locked')) && retries < 5) {
+                if ((err.code === 'SQLITE_BUSY' || err.message?.includes('database is locked')) && retries < 15) {
                     retries++
-                    await new Promise(r => setTimeout(r, 10 + Math.random() * 40))
+                    const delay = Math.min(10, (retries === 1 ? 1 : Math.pow(2, retries) * 2) + Math.random() * 2)
+                    await new Promise(r => setTimeout(r, delay))
                     continue
                 }
                 throw err
@@ -271,6 +274,17 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             } catch {}
             throw err
         }
+    }
+
+    async runTransaction<T>(fn: () => Promise<T>): Promise<T> {
+        return this.writeQueue.add(async () => {
+            this.inTransaction = true
+            try {
+                return await this.runInImmediateTransaction(fn)
+            } finally {
+                this.inTransaction = false
+            }
+        })
     }
 
     constructor(
@@ -506,6 +520,10 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async set(id: any, value: ITableDoc): Promise<void> {
+        if (this.inTransaction) {
+            await this._set(id, value)
+            return
+        }
         return this.writeQueue.add(async () => {
             return this.runInImmediateTransaction(async () => {
                 await this._set(id, value)
@@ -518,6 +536,10 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async delete(id: any): Promise<void> {
+        if (this.inTransaction) {
+            await this._delete(id)
+            return
+        }
         return this.writeQueue.add(async () => {
             return this.runInImmediateTransaction(async () => {
                 await this._delete(id)
@@ -855,12 +877,12 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
                     modifiedCount++
                 }
             }
-            const tx = this.config.multi
-                ? this.db.transaction(txBody).immediate
-                : this.db.transaction(txBody)
-
             const tStart = performance.now()
-            tx()
+            if (this.config.multi) {
+                txBody()
+            } else {
+                this.db.transaction(txBody)()
+            }
             const tEnd = performance.now()
             if (debug) {
                 debug.setDbExecTime(tEnd - tStart)
@@ -905,6 +927,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         updateOp: ITableUpdateOp<ITableDoc>,
         options?: ITableUpdateOptions,
     ): Promise<ITableUpdateResult> {
+        if (this.inTransaction) {
+            return this._updateMany(filter, updateOp, options)
+        }
         return this.writeQueue.add(async () => {
             return this.runInImmediateTransaction(async () => {
                 return this._updateMany(filter, updateOp, options)
@@ -916,6 +941,24 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         updates: { filter: ITableFilter; updateOp: ITableUpdateOp<ITableDoc>; options?: ITableUpdateOptions }[],
         options?: { debug?: ITableDebugResult },
     ): Promise<ITableUpdateResult> {
+        if (this.inTransaction) {
+            let matchedCount = 0
+            let modifiedCount = 0
+            const upsertedIds: any[] = []
+            for (const item of updates) {
+                try {
+                    const res = await this._updateOne(item.filter, item.updateOp, item.options)
+                    matchedCount += res.matchedCount
+                    modifiedCount += res.modifiedCount
+                    if (res.upsertedIds) {
+                        upsertedIds.push(...res.upsertedIds)
+                    }
+                } catch (e) {
+                    console.error("bulkUpdate error:", e)
+                }
+            }
+            return { matchedCount, modifiedCount, upsertedIds: upsertedIds.length > 0 ? upsertedIds : undefined }
+        }
         return this.writeQueue.add(async () => {
             return this.runInImmediateTransaction(async () => {
                 let matchedCount = 0
@@ -1132,12 +1175,12 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
               }
           }
 
-          const bulkUpdateTx = this.config.multi
-              ? this.db.transaction(txBody).immediate
-              : this.db.transaction(txBody)
-
-          bulkUpdateTx()
           const tExecEnd = performance.now()
+          if (this.config.multi) {
+              txBody()
+          } else {
+              this.db.transaction(txBody)()
+          }
 
           if (debug) {
               debug.setDbExecTime(tExecEnd - tExecStart)
@@ -1271,6 +1314,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         updateOp: ITableUpdateOp<ITableDoc>,
         options?: ITableUpdateOptions,
     ): Promise<ITableUpdateResult> {
+        if (this.inTransaction) {
+            return this._updateOne(filter, updateOp, options)
+        }
         return this.writeQueue.add(async () => {
             return this.runInImmediateTransaction(async () => {
                 return this._updateOne(filter, updateOp, options)
@@ -1281,6 +1327,14 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     private static BULK_IMPORT_THRESHOLD = 1000
 
     async insertMany(docs: ITableDoc[], options?: { debug?: ITableDebugResult }): Promise<ITableInsertResult> {
+        if (this.inTransaction) {
+            const shouldOptimize = docs.length >= SQLiteAdapterInstance.BULK_IMPORT_THRESHOLD && this.indexedFields.size > 0
+            if (shouldOptimize) {
+                return this.insertManyOptimized(docs)
+            } else {
+                return this.insertManyDefault(docs)
+            }
+        }
         return this.writeQueue.add(async () => {
             let debug: DebugCollector | undefined
             if (options?.debug) debug = new DebugCollector(options.debug)
@@ -1351,11 +1405,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             }
         }
 
-        const insertManyTx = this.config.multi
-            ? this.db.transaction(txBody).immediate
-            : this.db.transaction(txBody)
-
-        insertManyTx(serializedInfo)
+        if (this.config.multi) {
+            txBody(serializedInfo)
+        } else {
+            this.db.transaction(txBody)(serializedInfo)
+        }
         return result
     }
 
@@ -1395,13 +1449,12 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return result
     }
 
-    async setMany(docs: Partial<ITableDoc>[], options?: ITableSetOptions): Promise<ITableSetResult> {
-        return this.writeQueue.add(async () => {
-            let debug: DebugCollector | undefined
-            if (options?.debug) debug = new DebugCollector(options.debug)
-            if (debug) debug.setPrepareTime()
+    async _setMany(docs: Partial<ITableDoc>[], options?: ITableSetOptions): Promise<ITableSetResult> {
+        let debug: DebugCollector | undefined
+        if (options?.debug) debug = new DebugCollector(options.debug)
+        if (debug) debug.setPrepareTime()
 
-            const result: ITableSetResult = {
+        const result: ITableSetResult = {
             insertedCount: 0,
             overwriteCount: 0,
             insertedIds: [],
@@ -1473,11 +1526,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             }
         }
 
-        const setManyTx = this.config.multi
-            ? this.db.transaction(txBody).immediate
-            : this.db.transaction(txBody)
-
-        setManyTx()
+        if (this.config.multi) {
+            txBody()
+        } else {
+            this.db.transaction(txBody)()
+        }
         const tEnd = performance.now()
 
         if (debug) {
@@ -1485,8 +1538,18 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             debug.finish()
         }
         return result
-    })
-}
+    }
+
+    async setMany(docs: Partial<ITableDoc>[], options?: ITableSetOptions): Promise<ITableSetResult> {
+        if (this.inTransaction) {
+            return this._setMany(docs, options)
+        }
+        return this.writeQueue.add(async () => {
+            return this.runInImmediateTransaction(async () => {
+                return this._setMany(docs, options)
+            })
+        })
+    }
 
     async _deleteMany(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
         let debug: DebugCollector | undefined
@@ -1546,6 +1609,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async deleteMany(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
+        if (this.inTransaction) {
+            return this._deleteMany(filter, options)
+        }
         return this.writeQueue.add(async () => {
             return this.runInImmediateTransaction(async () => {
                 return this._deleteMany(filter, options)
@@ -1606,6 +1672,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     }
 
     async deleteOne(filter: ITableFilter, options?: ITableDeleteOptions): Promise<ITableDeletedResult> {
+        if (this.inTransaction) {
+            return this._deleteOne(filter, options)
+        }
         return this.writeQueue.add(async () => {
             return this.runInImmediateTransaction(async () => {
                 return this._deleteOne(filter, options)
@@ -1848,10 +1917,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
             this.indexedFields.clear()
         }
 
-        const dropTx = this.config.multi
-            ? this.db.transaction(dropTxFn).immediate
-            : this.db.transaction(dropTxFn)
-        dropTx()
+        if (this.config.multi) {
+            dropTxFn()
+        } else {
+            this.db.transaction(dropTxFn)()
+        }
     }
 
     async dropIndexes(): Promise<void> {

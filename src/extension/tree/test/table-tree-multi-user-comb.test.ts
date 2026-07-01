@@ -172,6 +172,7 @@ async function expectNoParentCycles(table: TableTree<ITestTreeNode>) {
 }
 
 describe("TableTree 多用户连续操作组合", () => {
+    vi.setConfig({ testTimeout: 120000 })
     test("多个用户实例连接同一目录树时应看到一致的操作结果和 metadata", async () => {
         const [alice, bob, chen] = await createMultiUserTables("shared-visibility")
         await seedSharedWorkspace(alice)

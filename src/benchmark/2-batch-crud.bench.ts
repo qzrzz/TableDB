@@ -2,7 +2,7 @@ import { Bench } from "tinybench"
 import { createBenchTable, generateDoc, prepareTableData, IBenchDoc } from "./utils"
 
 async function run() {
-    const bench = new Bench({ time: 1000 })
+    const bench = new Bench({ time: 50, iterations: 10 })
 
     const DATA_SIZE = 5000
     const tableNormal = await createBenchTable("bench_batch_normal", false)

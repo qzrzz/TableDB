@@ -16,16 +16,17 @@ export interface IBenchDoc extends ITableDoc {
 }
 
 export async function createBenchTable(name: string, enableMarkDelete: boolean = false) {
+    const filename = `./dist/test_tabledb_${name}.db`
     //删除测试数据库文件
     try {
-        if (fs.existsSync("./dist/test_tabledb.db")) fs.unlinkSync("./dist/test_tabledb.db")
+        if (fs.existsSync(filename)) fs.unlinkSync(filename)
     } catch (e) {
         console.warn(e)
     }
 
     const table = new Table<IBenchDoc>({
         name: name,
-        adapter: SQLiteAdapter({ filename: "./dist/test_tabledb.db" }),
+        adapter: SQLiteAdapter({ filename }),
         // adapter: MongoDBAdapter({
         //     auth: "mongodb://root:w2xO4Fd28Wc76o1sl8WAt3lo5sc42ver02@localhost:12779",
         //     dbName: "tableDbTest",

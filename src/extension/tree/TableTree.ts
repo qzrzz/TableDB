@@ -21,13 +21,48 @@ import { defineTable, UseTableFunction } from "../../core/defineTable"
  *
  */
 export class TableTree<TNode extends ITreeNode = ITreeNode> extends Table<TNode> {
-    createNodes: typeof createNodes = createNodes as any
-    updateNodes: typeof updateNodes = updateNodes as any
-    setNodes: typeof setNodes = setNodes as any
-    deleteNodes: typeof deleteNodes = deleteNodes as any
-    unDeleteNodes: typeof unDeleteNodes = unDeleteNodes as any
-    moveNodes: typeof moveNodes = moveNodes as any
-    copyNodes: typeof copyNodes = copyNodes as any
+    private inTreeTx = false
+
+    private async runTransaction<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.inTreeTx) {
+            return fn()
+        }
+        if (this.adapter && typeof (this.adapter as any).runTransaction === "function") {
+            this.inTreeTx = true
+            try {
+                return await (this.adapter as any).runTransaction(fn)
+            } finally {
+                this.inTreeTx = false
+            }
+        }
+        return fn()
+    }
+
+    constructor(tableOptions: ITableOptions<TNode>) {
+        super(tableOptions)
+
+        const wrap = (fn: Function) => {
+            return async (...args: any[]) => {
+                return this.runTransaction(() => fn.apply(this, args))
+            }
+        }
+
+        this.createNodes = wrap(createNodes) as any
+        this.updateNodes = wrap(updateNodes) as any
+        this.setNodes = wrap(setNodes) as any
+        this.deleteNodes = wrap(deleteNodes) as any
+        this.unDeleteNodes = wrap(unDeleteNodes) as any
+        this.moveNodes = wrap(moveNodes) as any
+        this.copyNodes = wrap(copyNodes) as any
+    }
+
+    createNodes!: typeof createNodes
+    updateNodes!: typeof updateNodes
+    setNodes!: typeof setNodes
+    deleteNodes!: typeof deleteNodes
+    unDeleteNodes!: typeof unDeleteNodes
+    moveNodes!: typeof moveNodes
+    copyNodes!: typeof copyNodes
     listNodes: typeof listNodes = listNodes as any
     listNodesByCursor: typeof listNodesByCursor = listNodesByCursor as any
     preOverwriteNodes: typeof preOverwriteNodes = preOverwriteNodes as any
