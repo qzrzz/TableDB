@@ -223,14 +223,25 @@ function registerCustomFunctions(db: ISqliteDatabase) {
     })
 }
 
+/**
+ * 写入队列类
+ * 用于串行化异步的数据库写入操作，防止并发冲突
+ */
 class WriteQueue {
-    private promise = Promise.resolve();
+    private promise: Promise<void> = Promise.resolve();
+
+    /**
+     * 向队列中添加一个异步写入任务
+     * @param fn 要执行的异步任务函数
+     * @returns 返回任务执行结果的 Promise
+     */
     async add<T>(fn: () => Promise<T>): Promise<T> {
         const next = this.promise.then(fn);
-        this.promise = next.catch(() => {});
+        this.promise = next.then(() => {}, () => {});
         return next;
     }
 }
+
 
 export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
     name = "SQLiteAdapter"
