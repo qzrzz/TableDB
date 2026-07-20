@@ -1,6 +1,6 @@
 {
     "name": "tbdb",
-    "version": "0.0.13",
+    "version": "0.0.16",
     "type": "module",
     "exports": {
         ".": {
@@ -18,7 +18,7 @@
         "build": "rslib build && npm run docs:build",
         "dev": "rslib build --watch",
         "test": "vitest",
-        "release": "npm run test && npm run build && npm publish && cnpm sync tbdb",
+        "release": "npm run test && npm run build && npm version patch --no-git-tag-version && npm publish && cnpm sync tbdb",
         "bench:tree": "node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
         "bench:tree:all": "TABLE_TREE_BENCH_ADAPTERS=sqlite,mongodb node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
         "docs:dev": "starmap --rebuild --port=4811",
