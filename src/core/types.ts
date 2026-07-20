@@ -244,9 +244,7 @@ export interface ITableUpdateOp<TSchema extends ITableDoc = ITableDoc> {
      * 子算子：{ $slice: number } 限制添加操作后，字段数组最大长度
      *
      */
-    $push?: {
-        [field: string]: ITableArrayAddOp
-    }
+    $push?: ITableArrayUpdate<TSchema>
 
     /**
      * 添加元素到字段并保持唯一
@@ -258,9 +256,7 @@ export interface ITableUpdateOp<TSchema extends ITableDoc = ITableDoc> {
      * 子算子：{ $slice: number } 限制添加操作后，字段数组最大长度
      * 注意元素顺序不影响对象的对比
      */
-    $addToSet?: {
-        [field: string]: ITableArrayAddOp
-    }
+    $addToSet?: ITableArrayUpdate<TSchema>
 
     /**
      * 从数组字段中移除匹配的元素
@@ -295,12 +291,71 @@ export interface ITableUpdateOp<TSchema extends ITableDoc = ITableDoc> {
     $rename?: { [oldField: string]: string }
 }
 
-export type ITableArrayAddOp =
-    | ITableValue
-    | { $each: ITableValue[] }
-    | { $each: ITableValue[]; $position: number }
-    | { $each: ITableValue[]; $slice: number }
-    | { $each: ITableValue[]; $position: number; $slice: number }
+/** 排除可空类型，便于识别可选数组字段。 */
+type ITableNonNullish<T> = Exclude<T, null | undefined>
+
+/** 获取数组字段的元素类型。 */
+type ITableArrayElement<T> = ITableNonNullish<T> extends readonly (infer TElement)[] ? TElement : never
+
+/**
+ * 递归获取 Schema 中所有数组字段路径。
+ *
+ * 除了顶层数组字段，也支持 `profile.loginRecords` 形式的嵌套路径。
+ * Table 原生值类型被视为叶子节点，避免递归进入 Date、Map 等对象内部。
+ * 路径深度限制为 8 层，避免循环引用的 Schema 造成类型无限递归。
+ */
+type ITableArrayFieldPath<T, TDepth extends unknown[] = []> = TDepth["length"] extends 8
+    ? never
+    : T extends object
+      ? {
+            [TKey in keyof T & string]: ITableNonNullish<T[TKey]> extends readonly unknown[]
+                ? TKey
+                : ITableNonNullish<T[TKey]> extends ITablePrimitive
+                  ? never
+                  : ITableNonNullish<T[TKey]> extends object
+                    ? `${TKey}.${ITableArrayFieldPath<ITableNonNullish<T[TKey]>, [...TDepth, unknown]>}`
+                    : never
+        }[keyof T & string]
+      : never
+
+/** 根据点路径获取 Schema 中对应字段的类型。 */
+type ITableFieldPathValue<T, TPath extends string> = TPath extends `${infer TKey}.${infer TRest}`
+    ? TKey extends keyof T
+        ? ITableFieldPathValue<ITableNonNullish<T[TKey]>, TRest>
+        : never
+    : TPath extends keyof T
+      ? ITableNonNullish<T[TPath]>
+      : never
+
+/** 为具有明确 Schema 的 Table 生成数组字段更新定义。 */
+type ITableSchemaArrayUpdate<TSchema> = {
+    [TPath in ITableArrayFieldPath<TSchema>]?: ITableArrayAddOp<
+        ITableArrayElement<ITableFieldPathValue<TSchema, TPath>>
+    >
+}
+
+/**
+ * 数组字段更新定义。
+ *
+ * 使用默认 ITableDoc 的底层 Adapter 没有业务 Schema，继续接受动态字段；
+ * 具有额外业务字段的 Table 则根据 Schema 严格推导数组元素类型。
+ */
+type ITableArrayUpdate<TSchema extends ITableDoc> = [Exclude<keyof TSchema, keyof ITableDoc>] extends [never]
+    ? { [field: string]: ITableArrayAddOp<any> }
+    : ITableSchemaArrayUpdate<TSchema>
+
+/**
+ * 向数组添加一个或多个元素。
+ *
+ * TElement 由目标数组字段推导，避免要求普通业务接口声明字符串索引签名。
+ */
+export type ITableArrayAddOp<TElement = ITableValue> =
+    | TElement
+    | {
+          $each: TElement[]
+          $position?: number
+          $slice?: number
+      }
 
 // ITableArrayAddOp
 // 添加元素到数组时的注意事项：
