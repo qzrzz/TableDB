@@ -76,10 +76,21 @@ export type UseTableFunction<
     adapter?: ITableDBAdapter
 }) => Promise<TTable>
 
-/** 定义全局的数据库适配器（SQLite/MongoDB）
+/** 定义全局的数据库适配器 
  *
  * @param adapter 数据库适配器实例
  */
 export function defineGlobalDBAdapter(adapter: ITableDBAdapter) {
     Table.globalAdapter = adapter
+}
+
+
+
+/**
+ * 获取全局的数据库适配器 
+ * 
+ * 可以用来检测 `defineGlobalDBAdapter()` 的实际结果
+ */
+export function getGlobalDBAdapter(){
+    return  Table.globalAdapter
 }
