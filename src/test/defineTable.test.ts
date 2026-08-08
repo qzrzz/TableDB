@@ -17,7 +17,9 @@ const useUserTable = defineTable({
   adapter: SQLiteAdapter({ filename: "./data/user.sqlite" }),
 });
 
-const userTable = await useUserTable();
-await userTable.insertOne({ id: "u_1", name: "Alice", age: 20 });
-let re = (await userTable.findOne({ id: "u_1" }))!;
-re.age;
+test("defineTable.test", async () => {
+  const userTable = await useUserTable();
+  await userTable.insertOne({ id: "u_1", name: "Alice", age: 20 });
+  let re = (await userTable.findOne({ id: "u_1" }))!;
+  re.age;
+});

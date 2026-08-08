@@ -61,7 +61,7 @@ const useUserTable = defineTable({
 - `enableAutoMetadata` 启用后会自动维护 `_createDate`、`_updateDate`、`_deleteDate`
 - `enableMarkDelete` 启用后删除操作会写入 `_isDeleted`，而不是物理删除
 - `projections` 预设一些可复用的投影配置，方便查询时直接使用
-
+x
 ### 适配器配置
 
 调用 `useTable()` 时提供 `adapter` 参数，也可以覆盖 `defineTable` 定义的 adapter：
