@@ -227,4 +227,23 @@ describe("TableTree 旧测试迁移后的核心场景", () => {
         expect(await table.get("old")).toBeUndefined()
         expect(await table.get("replacement")).toBeDefined()
     })
+
+    test("refreshTreeMetadata 应按子节点到父节点的顺序修复过期统计", async () => {
+        const table = await createTree("refresh-metadata")
+        await table.createNodes([{ id: "dir", name: "目录", isDir: true }], "/")
+        await table.createNodes([{ id: "sub", name: "子目录", isDir: true }], "dir")
+        await table.createNodes([{ id: "file", name: "文件", size: 12 }], "sub")
+
+        await table.adapter.updateMany(
+            { id: { $in: ["dir", "sub"] } },
+            { $unset: { ctotal: "", cftotal: "", csize: "", childLastIndex: "" } as any },
+        )
+
+        await table.refreshTreeMetadata("/")
+
+        expect((await table.get("sub"))?.ctotal).toBe(1)
+        expect((await table.get("sub"))?.csize).toBe(12)
+        expect((await table.get("dir"))?.ctotal).toBe(2)
+        expect((await table.get("dir"))?.csize).toBe(12)
+    })
 })

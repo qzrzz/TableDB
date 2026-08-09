@@ -117,4 +117,125 @@ describe("TableTree", () => {
         await table.updateNodes({ id: "f" }, { $set: { note: "内容更新" } as any })
         expect((await table.get("f"))?.note).toBe("内容更新")
     })
+
+    test("updateNodes 应忽略 parentId，不能通过更新制造父子环", async () => {
+        const table = await createTree("tree-update-ignore-parent")
+        await table.setNodes([
+            { id: "p", parentId: "/", name: "父", isDir: true },
+            { id: "c", parentId: "p", name: "子", isDir: true },
+        ])
+
+        await table.updateNodes({ id: "p" }, { $set: { parentId: "c", note: "仍更新内容" } as any })
+        expect((await table.get("p"))?.parentId).toBe("/")
+        expect((await table.get("p"))?.note).toBe("仍更新内容")
+        expect((await table.get("c"))?.parentId).toBe("p")
+    })
+
+    test("moveNodes 默认按 id 移动时不得删除目标父级下的兄弟节点", async () => {
+        const table = await createTree("tree-move-no-wipe")
+        await table.setNodes([
+            { id: "a", parentId: "/", name: "A", isDir: true },
+            { id: "b", parentId: "/", name: "B", isDir: true },
+            file("f1", "a"),
+            file("f2", "b"),
+            file("f3", "b"),
+        ])
+
+        await table.moveNodes(["f1"], "b")
+        expect((await table.get("f1"))?.parentId).toBe("b")
+        expect(await table.get("f2")).toBeDefined()
+        expect(await table.get("f3")).toBeDefined()
+        expect((await table.listNodes("b")).list.map((node) => node.id).sort()).toEqual(["f1", "f2", "f3"])
+    })
+
+    test("setNodes 移动已有节点时不得删除目标父级下的兄弟节点", async () => {
+        const table = await createTree("tree-set-move-no-wipe")
+        await table.setNodes([
+            { id: "a", parentId: "/", name: "A", isDir: true },
+            { id: "b", parentId: "/", name: "B", isDir: true },
+            file("f1", "a"),
+            file("f2", "b"),
+            file("f3", "b"),
+        ])
+
+        await table.setNodes([file("f1", "b", "f1")])
+        expect((await table.get("f1"))?.parentId).toBe("b")
+        expect(await table.get("f2")).toBeDefined()
+        expect(await table.get("f3")).toBeDefined()
+    })
+
+    test("moveNodes 的 newName 应真正写入新名称", async () => {
+        const table = await createTree("tree-move-newname")
+        await table.setNodes([
+            { id: "d1", parentId: "/", name: "D1", isDir: true },
+            { id: "d2", parentId: "/", name: "D2", isDir: true },
+            file("a", "d1", "file.txt"),
+            file("b", "d2", "file.txt"),
+        ])
+
+        await table.moveNodes(["a"], "d2", { uniqueBy: "name", overwriteMode: "newName" })
+        expect((await table.get("a"))?.parentId).toBe("d2")
+        expect((await table.get("a"))?.name).toBe("file (1).txt")
+        expect((await table.get("b"))?.name).toBe("file.txt")
+    })
+
+    test("moveNodes 默认禁止文件覆盖目录", async () => {
+        const table = await createTree("tree-move-file-over-dir")
+        await table.setNodes([
+            { id: "d", parentId: "/", name: "item", isDir: true },
+            file("child", "d", "c"),
+            { id: "src", parentId: "/", name: "src", isDir: true },
+            file("f", "src", "item"),
+        ])
+
+        await table.moveNodes(["f"], "/", { uniqueBy: "name", overwriteMode: "replace" })
+        expect(await table.get("d")).toBeDefined()
+        expect(await table.get("child")).toBeDefined()
+        expect((await table.get("f"))?.parentId).toBe("src")
+    })
+
+    test("moveNodes 的 merge 对文件冲突应按替换处理", async () => {
+        const table = await createTree("tree-move-merge-file")
+        await table.setNodes([
+            { id: "d", parentId: "/", name: "D", isDir: true },
+            file("a", "d", "same.txt"),
+            { id: "src", parentId: "/", name: "src", isDir: true },
+            { id: "b", parentId: "src", name: "same.txt", isDir: false, size: 2 },
+        ])
+
+        await table.moveNodes(["b"], "d", { uniqueBy: "name", overwriteMode: "merge" })
+        expect(await table.get("a")).toBeUndefined()
+        expect((await table.get("b"))?.parentId).toBe("d")
+        expect((await table.get("b"))?.size).toBe(2)
+    })
+
+    test("setNodes 的 mergeByModif 应保留较新的同名文件", async () => {
+        const table = await createTree("tree-set-merge-modif")
+        await table.setNodes([{ id: "old", parentId: "/", name: "f.txt", modif: 100, size: 1 }])
+        await table.setNodes([{ id: "new", parentId: "/", name: "f.txt", modif: 50, size: 9 }], {
+            uniqueBy: "name",
+            overwriteMode: "mergeByModif",
+        })
+
+        expect(await table.get("old")).toBeDefined()
+        expect((await table.get("old"))?.size).toBe(1)
+        expect(await table.get("new")).toBeUndefined()
+    })
+
+    test("refreshTreeMetadata 应修复空目录上的过期统计", async () => {
+        const table = await createTree("tree-refresh-empty")
+        await table.setNodes([
+            { id: "dir", parentId: "/", name: "目录", isDir: true },
+            file("f", "dir", "文件"),
+        ])
+        await table.adapter.updateMany(
+            { id: "dir" },
+            { $set: { ctotal: 99, cftotal: 99, csize: 999 } as any },
+        )
+        await table.adapter.deleteMany({ id: "f" }, { readDelete: true } as any)
+
+        await table.refreshTreeMetadata("dir")
+        expect((await table.get("dir"))?.ctotal).toBeUndefined()
+        expect((await table.get("dir"))?.csize).toBeUndefined()
+    })
 })

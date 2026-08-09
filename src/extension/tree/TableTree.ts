@@ -7,6 +7,7 @@ import { updateNodesCore, type ITreeUpdateNodesOptions } from "./core/updateNode
 import { deleteNodesCore, type ITreeDeleteNodesOptions, type ITreeDeleteResult } from "./core/deleteNodes"
 import { moveNodesCore, type ITreeMoveNodesOptions } from "./core/moveNodes"
 import { setNodesTool, type ITreeSetNodesOptions, type ITreeSetNodesResult } from "./tool/setNodes"
+import { refreshTreeMetadata as refreshTreeMetadataTool } from "./tool/refreshTreeMetadata"
 import { listNodes as listNodesCore, type ITreeListNodesOptions, type ITreeListNodesResult } from "./core/listNodes"
 
 /**
@@ -31,6 +32,7 @@ export interface ITableTreeOptions<TNode extends ITreeNode = ITreeNode> extends 
  * - `deleteNodes` 处理节点及其子树删除；
  * - `moveNodes` 处理节点移动、排序和覆盖冲突；
  * - `setNodes` 是面向调用方的编排工具，会按输入意图拆解为多个 core 操作；
+ * - `refreshTreeMetadata` 用于修复已有树数据的统计字段；
  * - `listNodes` 只负责固定父节点范围并复用 Table 的分页查询能力。
  *
  * ## 事务和并发边界
@@ -95,8 +97,11 @@ export class TableTree<TNode extends ITreeNode = ITreeNode> extends Table<TNode>
      * 更新符合过滤条件的已有节点。
      *
      * `filter` 和 `updateOp` 沿用 TableDB 的查询与更新操作符。方法会校验目录树相关
-     * 字段，自动写入本次 `modif`，并在 `size`、`isDir`、`parentId` 或 `index` 变化时
-     * 刷新受影响的父级统计。
+     * 字段，自动写入本次 `modif`，并在 `size`、`isDir` 或 `index` 变化时刷新受影响
+     * 的父级统计。
+     *
+     * `parentId` 会被静默忽略：updateNodes 只做内容/业务字段更新，移动节点请使用
+     * `moveNodes` 或 `setNodes`，避免半成功写入造成父子环。
      *
      * 此方法默认不启动数据库事务，这是目录树“更新不要求多实例结构安全”的约定。
      * 它仍会在同一实例内排队执行；需要跨多个 core 操作保持原子性时，应改用 `setNodes`。
@@ -162,6 +167,21 @@ export class TableTree<TNode extends ITreeNode = ITreeNode> extends Table<TNode>
     ) => {
         // 移动同时改变节点关系和两侧父级统计，属于必须保持原子性的结构操作。
         return runTreeMutation(this, (context) => moveNodesCore(context as any, nodeIds, parentId, options))
+    }
+
+    /**
+     * 按子节点到父节点的顺序完整刷新目录树 metadata。
+     *
+     * 该方法用于修复外部批量写入、历史数据或异常中断造成的统计不一致，会重新计算
+     * `ctotal`、`cftotal`、`csize` 和 `childLastIndex`。`parentId` 为 `/` 时刷新整棵
+     * 可达树，否则只刷新指定节点及其子树。
+     *
+     * 正常的创建、更新、移动和删除操作已经会自动维护 metadata，只有在需要校准已有
+     * 数据时才需要调用本方法。事务和 adapter session 由内部 tool 处理，调用方无需
+     * 传入或管理事务对象。
+     */
+    refreshTreeMetadata = async (parentId: string): Promise<void> => {
+        await refreshTreeMetadataTool(this, parentId)
     }
 
     /**

@@ -128,12 +128,23 @@ async function resolveSetConflicts(
 
     for (const [parentId, parentNodes] of nodesByParent) {
         const values = parentNodes.map((node) => getNodeValueByPath(node, uniqueBy))
-        const siblingFilter = mode === "newName"
-            ? { parentId }
-            : { parentId, [uniqueBy]: { $in: values }, id: { $nin: parentNodes.map((node) => node.id) } }
         const sourceIds = new Set(parentNodes.map((node) => node.id))
-        const siblings = (await context.view.findMany(siblingFilter as any, { ignoreMarkDelete: false }) as ITreeNode[])
-            .filter((sibling) => !sourceIds.has(sibling.id))
+        // uniqueBy 为 id 时，同级不可能存在另一个同 id 节点，无需查冲突。
+        // 其它 uniqueBy 必须用 $and，避免与 id 排除条件在同一层对象里撞键覆盖。
+        let siblings: ITreeNode[] = []
+        if (mode === "newName") {
+            siblings = (await context.view.findMany({ parentId }, { ignoreMarkDelete: false }) as ITreeNode[])
+                .filter((sibling) => !sourceIds.has(sibling.id))
+        } else if (uniqueBy !== "id") {
+            siblings = (await context.view.findMany({
+                $and: [
+                    { parentId },
+                    { [uniqueBy]: { $in: values } },
+                    { id: { $nin: parentNodes.map((node) => node.id) } },
+                ],
+            } as any, { ignoreMarkDelete: false }) as ITreeNode[])
+                .filter((sibling) => !sourceIds.has(sibling.id))
+        }
         const siblingByValue = new Map(siblings.map((sibling) => [stableValue(getNodeValueByPath(sibling, uniqueBy)), sibling]))
         const siblingNames = new Set(siblings.map((sibling) => sibling.name))
 
@@ -169,6 +180,11 @@ async function resolveSetConflicts(
                 result.push({ ...node, id: conflict.id })
                 plannedKeys.add(plannedKey)
                 mergeSources.push({ sourceId: node.id, targetId: conflict.id })
+                continue
+            }
+
+            if (mode === "mergeByModif" && (conflict.modif ?? 0) > (node.modif ?? 0)) {
+                // 目标节点更新，跳过输入，保留较新数据。
                 continue
             }
 
