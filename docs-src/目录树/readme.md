@@ -5,7 +5,7 @@ icon: ri-node-tree
 
 # 目录树 | Tree
 
-目录树（Tree）是 TableDB 的一个扩展功能，提供了树形结构的数据管理能力。通过目录树扩展，你可以得到一个功能完善的树形数据结构，支持节点的创建、查询、更新、删除、移动、复制等操作，它会自动维护目录树功能的元数据。
+目录树（Tree）是 TableDB 的一个扩展功能，提供了树形结构的数据管理能力。通过目录树扩展，你可以得到一个功能完善的树形数据结构，支持节点的创建、查询、更新、删除、移动等操作，它会自动维护目录树功能的元数据。
 
 ## 概念
 
@@ -42,7 +42,7 @@ icon: ri-node-tree
 
 #### 排序操作
 
-- **新建、移动节点位置** 用户可以指定插入位置（插入到开头/末尾/某个节点的后面/某个节点的前面），如果用户没有指定，会依照父节点是否有 `childLastIndex` 属性，如果有意味着父节点已经有排序需求，则会默认追加到末尾，并重写 `childLastIndex`，如果没有则会把 `index` 设置为空字符串（`createNodes`, `copyNodes`,`setNodes`,`moveNodes`）
+- **新建、移动节点位置** 用户可以指定插入位置（插入到开头/末尾/某个节点的后面/某个节点的前面），如果用户没有指定，会依照父节点是否有 `childLastIndex` 属性，如果有意味着父节点已经有排序需求，则会默认追加到末尾，并重写 `childLastIndex`，如果没有则会把 `index` 设置为空字符串（`createNodes`, `setNodes`, `moveNodes`）
 
 - **更新 `index`** 如果任何更新涉及到修改目标节点位置的情况，会触发[智能重排 (smartRebalance)](https://www.npmjs.com/package/indexless?activeTab=readme#%E9%87%8D%E5%88%86%E5%B8%83)，并且根据情况修改父节点 `childLastIndex` 的值
 
@@ -70,7 +70,7 @@ icon: ri-node-tree
 
 这些字段通常都只允许内部维护，外部写入会被忽略（`modif`、`cmodif` 允许用户修改，如果用户指定了以用户的为准）。
 
-被删除的节点不在 `ctotal`,`cftotal`,`csize` 的统计范围，如果 `unDeleteNodes()` 会正确更新这些属性。
+被删除的节点不在 `ctotal`,`cftotal`,`csize` 的统计范围，使用 `setNodes()` 写入被标记删除节点时会恢复节点，并正确更新这些属性。
 
 #### 维护策略
 
@@ -84,7 +84,7 @@ icon: ri-node-tree
 
 ### 节点覆盖选项
 
-覆盖选项主要用于 `checkNodes()`、`setNodes()`、`moveNodes()` 这类会把节点写入到目标父节点下的操作。它会在目标父节点的直属子节点中按 `uniqueBy` 查找冲突节点，再按 `overwriteMode` 决定覆盖、合并、跳过或改名。
+覆盖选项主要用于 `setNodes()`、`moveNodes()` 这类会把节点写入到目标父节点下的操作。它会在目标父节点的直属子节点中按 `uniqueBy` 查找冲突节点，再按 `overwriteMode` 决定覆盖、合并、跳过或改名。
 
 @import "../../src/extension/tree/tree.types.ts" @only=ITreeOverwriteOptions @full
 
@@ -128,17 +128,17 @@ TreeTable 可以除了可以使用基本的[增删改查](/units/docs-src-u589eu
 
 ### 创建节点 `createNodes()`
 
-@import "../../src/extension/tree/core/createNodes.ts" @doc=createNodes
+@import "../../src/extension/tree/core/createNodes.ts" @doc=createNodesCore
 
 ### 更新节点 `updateNodes()`
 
-@import "../../src/extension/tree/core/updateNodes.ts" @doc=updateNodes
+@import "../../src/extension/tree/core/updateNodes.ts" @doc=updateNodesCore
 
 相比于 `setNodes()` , `updateNodes()` 是一个更底层的接口，提供了更灵活的更新能力。它接受一个过滤器参数 `filter` 来指定要更新哪些节点，以及一个更新操作参数 `updateOp` 来定义如何更新这些节点。这意味着 `updateNodes()` 的资源消耗是不确定的，通常来说不会公开给客户端直接调用。
 
 ### 设置节点数据 `setNodes()`
 
-@import "../../src/extension/tree/core/setNodes.ts" @doc=setNodes
+@import "../../src/extension/tree/tool/setNodes.ts" @doc=setNodesTool
 
 `setNodes()` 提供了简单的方式来创建或更新节点数据。它接受一个节点数据数组 `nodes`，可以根据数据更新或者创建节点。它的资源消耗是确定可控的，就是每个节点对应一次更新或创建操作。
 
@@ -146,19 +146,9 @@ TreeTable 可以除了可以使用基本的[增删改查](/units/docs-src-u589eu
 
 在 `setNodes()` 中可以使用覆盖选项来控制当目标位置有冲突节点时的处理方式，覆盖选项包括 `uniqueBy` 和 `overwriteMode`，具体见 [节点覆盖选项](#节点覆盖选项)。
 
-#### 预同步
-
-当进行 `setNodes()` 操作时会对节点进行修改，此时客户端上的节点可能已经过时了，为了让客户端可以知道此次操作前数据是否已经过时，就可以用 `presync` 选项来进行预同步。
-
-客户端提供 `oldModif` 或 `oldCmodif` 两个值，服务端会把它们和当前数据的 `modif` 和 `cmodif` 进行对比，把结果在 `setNodes()` 结果中返回。
-
 ### 删除节点 `deleteNodes()`
 
-@import "../../src/extension/tree/core/deleteNodes.ts" @doc=deleteNodes
-
-### 恢复删除的节点 `unDeleteNodes()`
-
-@import "../../src/extension/tree/core/unDeleteNodes.ts" @doc=unDeleteNodes
+@import "../../src/extension/tree/core/deleteNodes.ts" @doc=deleteNodesCore
 
 如何开启 `enableMarkDelete` 选项：
 
@@ -170,26 +160,14 @@ let useTree = new TableTree<ITreeNode>(table, {
 
 ### 移动节点 `moveNodes()`
 
-@import "../../src/extension/tree/core/moveNodes.ts" @doc=moveNodes
+@import "../../src/extension/tree/core/moveNodes.ts" @doc=moveNodesCore
 
 ### 列出子节点 `listNodes()`
 
 @import "../../src/extension/tree/core/listNodes.ts" @doc=listNodes
 
-### 列出子节点（游标） `listNodesByCursor()`
-
-@import "../../src/extension/tree/core/listNodesByCursor.ts" @doc=listNodesByCursor
-
-### 预覆盖节点 `preOverwriteNodes()`
-
-@import "../../src/extension/tree/core/preOverwriteNodes.ts" @doc=preOverwriteNodes
-
-### 预同步节点 `presyncNodes()`
-
-@import "../../src/extension/tree/core/presyncNodes.ts" @doc=presyncNodes
-
-## 工具接口
+## 内部工具
 
 ### 刷新树元数据 `refreshTreeMetadata`
 
-@import "../../src/extension/tree/tool/refreshTreeMetadata.ts" @doc=refreshTreeMetadata
+@import "../../src/extension/tree/util/refreshTreeMetadata.ts" @doc=refreshTreeMetadata

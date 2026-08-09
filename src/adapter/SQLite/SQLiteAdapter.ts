@@ -17,6 +17,7 @@ import {
     ITableUpdateOptions,
     ITableUpdateResult,
     ITableDebugResult,
+    ITableTransactionOptions,
 } from "../adapter"
 import { ITableFilter, ITableUpdateOp } from "../../core/types"
 import { deserialize, serialize, serializeSync, fastDeserialize } from "./utils/serializer"
@@ -288,9 +289,9 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         return quoteIdentifier(`_schema_dirty_${this.tableName}`)
     }
 
-    private async runInImmediateTransaction<T>(fn: () => Promise<T>): Promise<T> {
+    private async runInImmediateTransaction<T>(fn: (transaction: ITableDBAdapterInstance) => Promise<T>): Promise<T> {
         // 同一实例的嵌套事务直接复用外层事务，避免 BEGIN 嵌套和队列死锁。
-        if (this.inTransaction) return fn()
+        if (this.inTransaction) return fn(this)
 
         let retries = 0
         const retryDeadline = Date.now() + 5000
@@ -313,7 +314,7 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
 
         this.inTransaction = true
         try {
-            const res = await fn()
+            const res = await fn(this)
             this.db.prepare("COMMIT").run()
             return res
         } catch (err) {
@@ -326,8 +327,11 @@ export class SQLiteAdapterInstance implements ITableDBAdapterInstance {
         }
     }
 
-    async runTransaction<T>(fn: () => Promise<T>): Promise<T> {
-        if (this.inTransaction) return fn()
+    async runTransaction<T>(
+        fn: (transaction: ITableDBAdapterInstance) => Promise<T>,
+        _options?: ITableTransactionOptions,
+    ): Promise<T> {
+        if (this.inTransaction) return fn(this)
         return this.writeQueue.add(async () => {
             return this.runInImmediateTransaction(fn)
         })

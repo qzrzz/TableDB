@@ -78,6 +78,18 @@ describe("TableTree deleteNodes / unDeleteNodes 标记删除模式", () => {
         expect((await table.get("root"))?.csize).toBe(25)
     })
 
+    test("重复软删除同一节点时应返回无变更结果", async () => {
+        const table = await createDefinedTreeTable("mark-idempotent", true)
+        await createDeleteFixture(table)
+
+        await table.deleteNodes(["child-file"])
+        await expect(table.deleteNodes(["child-file"])).resolves.toEqual({
+            hasDeleted: false,
+            hasChildDeleted: false,
+            deletedCount: 0,
+        })
+    })
+
     test("删除目录应递归标记删除全部后代并从普通查询中隐藏", async () => {
         const table = await createDefinedTreeTable("mark-dir", true)
         await createDeleteFixture(table)

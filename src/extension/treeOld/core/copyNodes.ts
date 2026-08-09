@@ -7,6 +7,7 @@ import { assertTreeParentExists } from "../util/assertTreeParent"
 import { resolveTreeIndexes } from "../util/resolveTreeIndex"
 import { repairDuplicatedSiblingNames } from "../util/repairDuplicatedSiblingNames"
 import { collectTopSelectedNodes } from "../util/collectTopSelectedNodes"
+import { setNodes } from "./setNodes"
 
 /** 复制节点选项 */
 export type ITreeCopyNodesOptions = ITreeOverwriteOptions & {
@@ -82,7 +83,8 @@ export async function copyNodes(
     }
 
     const { index, ...setOptions } = options ?? {}
-    await this.setNodes(copyNodes, setOptions)
+    // 这里调用未包装的核心函数，避免在外层复制事务中重新排队导致死锁。
+    await setNodes.call(this, copyNodes, setOptions)
     if (shouldRenameOnCopy) {
         // 多用户同时复制时，预先生成的名称仍可能冲突，写入后再做一次兜底修复。
         await repairDuplicatedSiblingNames(this, parentId, createdNodeIds)

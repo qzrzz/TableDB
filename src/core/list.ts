@@ -221,7 +221,7 @@ export async function listPagingByCursor<T>(
     // 如果使用了 _id 作为排序键，返回值去掉 _id 字段
     if (sortKey === "_id") {
         for (const element of list) {
-            delete element._id
+            delete (element as any)._id
         }
     }
 

@@ -11,6 +11,21 @@ function createTreeTable(name: string) {
 }
 
 describe("TableTree 目录树核心接口", () => {
+    test("同一实例并发创建节点时应串行维护父级统计和排序索引", async () => {
+        const table = createTreeTable("tree_concurrent_create")
+        await table.inited
+
+        await table.createNodes([{ id: "dir", name: "目录", isDir: true }], "/")
+        await Promise.all([
+            table.createNodes([{ id: "left", name: "left", isDir: false, size: 1 }], "dir"),
+            table.createNodes([{ id: "right", name: "right", isDir: false, size: 2 }], "dir"),
+        ])
+
+        expect(await table.findMany({ parentId: "dir" })).toHaveLength(2)
+        expect((await table.get("dir"))?.ctotal).toBe(2)
+        expect((await table.get("dir"))?.csize).toBe(3)
+    })
+
     test("创建节点后应维护父节点统计信息", async () => {
         const table = createTreeTable("tree_create_metadata")
         await table.inited

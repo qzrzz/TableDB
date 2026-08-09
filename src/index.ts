@@ -28,8 +28,21 @@ export type {
     ITableSetResult,
     ITableUpdateOptions,
     ITableUpdateResult,
+    ITableTransactionOptions,
 } from "./adapter/adapter"
 export { SQLiteAdapter } from "./adapter/SQLite"
 export { MongoDBAdapter } from "./adapter/MongoDB"
-export { TableTree } from "./extension/tree"
+export type { MongoDBAdapterConfig } from "./adapter/MongoDB"
+export { TableTree, defineTableTree } from "./extension/tree"
+export type {
+    ITableTreeOptions,
+    ITreeCreateNodesOptions,
+    ITreeCreateResult,
+    ITreeUpdateNodesOptions,
+    ITreeDeleteNodesOptions,
+    ITreeDeleteResult,
+    ITreeMoveNodesOptions,
+    ITreeSetNodesOptions,
+    ITreeSetNodesResult,
+} from "./extension/tree"
 export { TableJSON } from "fzz"

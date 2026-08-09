@@ -1,6 +1,7 @@
 {
     "extends": "./tsconfig.json",
     "exclude": [
+        "src/extension/treeOld/**/*",
         "src/test/**/*",
         "src/**/*.test.ts"
     ]

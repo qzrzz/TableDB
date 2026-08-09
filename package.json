@@ -17,10 +17,10 @@
     "scripts": {
         "build": "rslib build && npm run docs:build",
         "dev": "rslib build --watch",
-        "test": "vitest",
+        "test": "vitest --exclude 'src/extension/treeOld/**'",
         "release": "npm run test && npm run build && npm version patch --no-git-tag-version && npm publish && cnpm sync tbdb",
-        "bench:tree": "node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
-        "bench:tree:all": "TABLE_TREE_BENCH_ADAPTERS=sqlite,mongodb node --import tsx src/extension/tree/test/benchmark/table-tree.bench.ts",
+        "bench:tree": "node --import tsx src/extension/treeOld/test/benchmark/table-tree.bench.ts",
+        "bench:tree:all": "TABLE_TREE_BENCH_ADAPTERS=sqlite,mongodb node --import tsx src/extension/treeOld/test/benchmark/table-tree.bench.ts",
         "docs:dev": "starmap --rebuild --port=4811",
         "docs:build": "starmap build --buildDir=docs"
     },

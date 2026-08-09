@@ -35,6 +35,62 @@ async function listChildIds(table: TableTree<ITestTreeNode>, parentId: string) {
 }
 
 describe("TableTree setNodes", () => {
+    test("部分更新已有节点时应保留未提供的树结构字段", async () => {
+        const table = await createDefinedTreeTable("partial-update-preserves-fields")
+
+        await table.createNodes([{ id: "dir", name: "目录", isDir: true }], "/")
+        await table.createNodes([{ id: "file", name: "原文件.txt", isDir: false, size: 12, tag: "old" }], "dir")
+
+        await table.setNodes([{ id: "file", tag: "new" }])
+
+        const file = await table.get("file")
+        expect(file?.parentId).toBe("dir")
+        expect(file?.name).toBe("原文件.txt")
+        expect(file?.isDir).toBe(false)
+        expect(file?.size).toBe(12)
+        expect(file?.tag).toBe("new")
+    })
+
+    test("replace 已存在的来源节点时应保留来源 ID 和原有子树", async () => {
+        const table = await createDefinedTreeTable("replace-existing-source")
+
+        await table.createNodes(
+            [
+                { id: "source-parent", name: "来源父级", isDir: true },
+                { id: "target-parent", name: "目标父级", isDir: true },
+            ],
+            "/",
+        )
+        await table.createNodes([{ id: "source", name: "same", isDir: true }], "source-parent")
+        await table.createNodes([{ id: "source-child", name: "child.txt", isDir: false, size: 4 }], "source")
+        await table.createNodes([{ id: "target", name: "same", isDir: true }], "target-parent")
+        await table.createNodes([{ id: "target-child", name: "stale.txt", isDir: false, size: 8 }], "target")
+
+        await table.setNodes(
+            [{ id: "source", parentId: "target-parent", name: "same", isDir: true }],
+            { uniqueBy: "name", overwriteMode: "replace" },
+        )
+
+        expect(await table.get("target")).toBeUndefined()
+        expect((await table.get("source"))?.parentId).toBe("target-parent")
+        expect((await table.get("source-child"))?.parentId).toBe("source")
+        expect(await table.get("target-child")).toBeUndefined()
+    })
+
+    test("uniqueBy 对象值相等时应识别为同一冲突键", async () => {
+        const table = await createDefinedTreeTable("object-unique-value")
+
+        await table.createNodes([{ id: "old", name: "old", isDir: false, meta: { hash_md5: "same" } }], "/")
+        await table.setNodes(
+            [{ id: "incoming", parentId: "/", name: "new", isDir: false, meta: { hash_md5: "same" } }],
+            { uniqueBy: "meta", overwriteMode: "replace" },
+        )
+
+        expect(await table.findMany({ parentId: "/" })).toHaveLength(1)
+        expect((await table.get("old"))?.meta).toEqual({ hash_md5: "same" })
+        expect(await table.get("incoming")).toBeUndefined()
+    })
+
     test("应该能够创建节点并返回本次变更信息", async () => {
         const table = await createDefinedTreeTable("create")
         const options: ITreeSetNodesOptions = {
@@ -591,6 +647,12 @@ describe("TableTree setNodes", () => {
         ).rejects.toThrow("父节点不存在")
         await expect(table.setNodes([{ id: "bad", parentId: "/", name: "bad/name", isDir: false }])).rejects.toThrow(
             "/",
+        )
+        await expect(table.setNodes([{ id: "bad-type", parentId: "/", name: "bad", isDir: null as any }])).rejects.toThrow(
+            "isDir",
+        )
+        await expect(table.setNodes([{ id: "bad-size", parentId: "/", name: "bad", isDir: false, size: -1 }])).rejects.toThrow(
+            "size",
         )
     })
 

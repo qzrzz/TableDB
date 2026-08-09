@@ -3,6 +3,6 @@ export default defineConfig({
     test: {
         watch: false,
         globals: true,
-        exclude: ["es", "node_modules", "dist"],
+        exclude: ["es", "node_modules", "dist", "src/extension/treeOld/**"],
     },
 })

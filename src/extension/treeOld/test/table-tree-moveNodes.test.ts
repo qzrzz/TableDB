@@ -302,6 +302,36 @@ describe("defineTableTree 创建的 TableTree moveNodes", () => {
         expect((await table.get("target"))?.cmodif).toBe(result.cmodif)
     })
 
+    test("merge 递归移动子节点时不应复用外层父级的排序锚点", async () => {
+        const table = await createDefinedTreeTable("merge-nested-index-anchor")
+
+        await table.createNodes(
+            [
+                { id: "source-parent", name: "来源父级", isDir: true },
+                { id: "target-parent", name: "目标父级", isDir: true },
+            ],
+            "/",
+        )
+        await table.createNodes([{ id: "source", name: "same", isDir: true }], "source-parent")
+        await table.createNodes([{ id: "source-child", name: "child.txt", isDir: false }], "source")
+        await table.createNodes(
+            [
+                { id: "anchor", name: "anchor", isDir: false },
+                { id: "target", name: "same", isDir: true },
+            ],
+            "target-parent",
+            { index: { toEnd: true } },
+        )
+
+        await table.moveNodes(["source"], "target-parent", {
+            uniqueBy: "name",
+            overwriteMode: "merge",
+            index: { prevNodeId: "anchor" },
+        })
+
+        expect((await table.get("source-child"))?.parentId).toBe("target")
+    })
+
     test("mergeByModif 对文件冲突应保留较新的目标节点", async () => {
         const table = await createDefinedTreeTable("merge-by-modif-older")
 

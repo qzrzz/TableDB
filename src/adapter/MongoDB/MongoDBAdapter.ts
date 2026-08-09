@@ -12,21 +12,31 @@ import {
     ITableDefineIndexesOptions,
     ITableIndexConfig,
     ITableDeleteOptions,
+    ITableTransactionOptions,
 } from "../adapter"
 import { ITableFilter, ITableUpdateOp } from "../../core/types"
 import { useMongoDB } from "./useMongoDB"
-import type { Collection } from "mongodb"
+import type { ClientSession, Collection, MongoClient } from "mongodb"
 import { jsToMongo, mongoToJs } from "./lib/docType"
 import { buildProjection } from "./lib/normalizeProjection"
 import { normalizeSort } from "./lib/normalizeSort"
 import { isPlainObject } from "fzz"
 
-export function MongoDBAdapter(config: { auth: string; dbName: string }) {
+export interface MongoDBAdapterConfig {
+    auth: string
+    dbName: string
+    /** 默认给逻辑主键 id 建唯一索引，避免多实例并发创建同一节点产生重复记录。 */
+    ensureIdIndex?: boolean
+}
+
+export function MongoDBAdapter(config: MongoDBAdapterConfig) {
     const Adapter = {
         name: "MongoDBAdapter",
         async useAdapterInstance(tableName: string): Promise<MongoDBAdapterInstance> {
-            let db = await useMongoDB(config)
-            return new MongoDBAdapterInstance(db.collection(tableName)) as any
+            const connection = await useMongoDB(config)
+            const instance = new MongoDBAdapterInstance(connection.db.collection(tableName), connection.client)
+            if (config.ensureIdIndex !== false) await instance.ensureIdIndex()
+            return instance as any
         },
     } as ITableDBAdapter
     return Adapter
@@ -34,14 +44,60 @@ export function MongoDBAdapter(config: { auth: string; dbName: string }) {
 
 export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
     name = "MongoDBAdapter"
-    constructor(public collection: Collection) { }
+    constructor(
+        public collection: Collection,
+        private readonly client: MongoClient = collection.db.client,
+        private readonly session?: ClientSession,
+    ) { }
+
+    /** 将当前 session 注入每一个 MongoDB 操作，保证事务内读写使用同一快照。 */
+    private withSession<T extends Record<string, any>>(options?: T): T & { session?: ClientSession } {
+        if (!this.session) return (options ?? {}) as T & { session?: ClientSession }
+        return { ...(options ?? {}), session: this.session } as T & { session?: ClientSession }
+    }
+
+    /** 确保业务主键 id 在数据库层唯一；事务只能保证原子性，不能替代唯一约束。 */
+    async ensureIdIndex(): Promise<void> {
+        // 不显式指定名称，和 Table schema 自动生成的 id_1 索引保持幂等。
+        await this.collection.createIndex({ id: 1 }, { unique: true })
+    }
+
+    /**
+     * 使用 MongoDB 的 withTransaction 执行事务。
+     * MongoDB 驱动会对 TransientTransactionError 和提交结果未知进行重试；
+     * 事务回调必须始终使用传入的 transaction 实例，不能继续使用外层实例。
+     */
+    async runTransaction<T>(
+        callback: (transaction: ITableDBAdapterInstance) => Promise<T>,
+        options?: ITableTransactionOptions,
+    ): Promise<T> {
+        if (this.session) return callback(this)
+
+        const session = this.client.startSession()
+        try {
+            const transactionOptions: any = {
+                readConcern: options?.readConcern ?? { level: "snapshot" },
+                writeConcern: options?.writeConcern ?? { w: "majority" },
+            }
+            if (options?.maxCommitTimeMS !== undefined) {
+                transactionOptions.maxCommitTimeMS = options.maxCommitTimeMS
+            }
+
+            return await session.withTransaction(
+                () => callback(new MongoDBAdapterInstance(this.collection, this.client, session)),
+                transactionOptions,
+            )
+        } finally {
+            await session.endSession()
+        }
+    }
 
     // -------------------------------------------------------
     // KV 基础操作
 
     /** 获取一个文档 */
     async get(id: any): Promise<ITableDoc | void> {
-        const res = await this.collection.findOne({ id }, { projection: { _id: 0 } })
+        const res = await this.collection.findOne({ id }, this.withSession({ projection: { _id: 0 } }))
         if (!res) return undefined
         return mongoToJs(res) as ITableDoc
     }
@@ -50,18 +106,18 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
     async set(id: any, value: ITableDoc): Promise<void> {
         let doc = jsToMongo(value)
         if (doc instanceof Promise) doc = await doc
-        await this.collection.replaceOne({ id }, doc, { upsert: true })
+        await this.collection.replaceOne({ id }, doc, this.withSession({ upsert: true }))
         return
     }
 
     /** 删除一个文档 */
     async delete(id: any): Promise<void> {
-        await this.collection.deleteOne({ id })
+        await this.collection.deleteOne({ id }, this.withSession())
     }
 
     /** 检查文档是否存在 */
     async has(id: any): Promise<boolean> {
-        const count = await this.collection.countDocuments({ id }, { limit: 1 })
+        const count = await this.collection.countDocuments({ id }, this.withSession({ limit: 1 }))
         return count > 0
     }
 
@@ -70,15 +126,15 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
         if (filter) {
             let query = jsToMongo(filter, true)
             if (query instanceof Promise) query = await query
-            return await this.collection.countDocuments(query)
+            return await this.collection.countDocuments(query, this.withSession())
         }
         // 无 filter 时 estimatedDocumentCount 使用元数据统计，速度极快（O(1)）
-        return await this.collection.estimatedDocumentCount()
+        return await this.collection.estimatedDocumentCount(this.withSession())
     }
 
     /** 清空所有文档 */
     async clear(): Promise<void> {
-        await this.collection.deleteMany({})
+        await this.collection.deleteMany({}, this.withSession())
     }
 
     /** 清除所有数据和索引 */
@@ -89,11 +145,11 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
 
     /** 删除所有数据和索引 */
     async drop(): Promise<void> {
-        await this.collection.drop()
+        await this.collection.drop(this.withSession())
     }
 
     async close(): Promise<void> {
-        this.collection.db.client.close()
+        await this.client.close()
     }
 
     // MongoDB 风格的操作 ---------------------------
@@ -117,7 +173,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
         }
 
         // console.log(">>> findMany query:", {query, mongoOptions})
-        let cursor = this.collection.find(query, mongoOptions)
+        let cursor = this.collection.find(query, this.withSession(mongoOptions))
 
         const docs = await cursor.toArray()
         return docs.map((d) => mongoToJs(d)) as ITableDoc[]
@@ -140,7 +196,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
             if (options.caseSensitive === false) mongoOptions.collation.strength = 2
         }
 
-        const res = await this.collection.findOne(query, mongoOptions)
+        const res = await this.collection.findOne(query, this.withSession(mongoOptions))
         if (!res) return undefined
         return mongoToJs(res) as ITableDoc
     }
@@ -164,12 +220,12 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
         let res: any
         if (options?.sort) {
             // updateOne 不直接支持 sort 选项，需要使用 findOneAndUpdate
-            res = await this.collection.findOneAndUpdate(query, update, {
+            res = await this.collection.findOneAndUpdate(query, update, this.withSession({
                 ...mongoOptions,
                 sort: normalizeSort(options.sort),
                 returnDocument: "after",
                 includeResultMetadata: true,
-            })
+            }))
 
             let upsertedIds: any[] | undefined
             if (res.lastErrorObject?.upserted) {
@@ -182,7 +238,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
                 upsertedIds,
             }
         } else {
-            res = await this.collection.updateOne(query, update, mongoOptions)
+            res = await this.collection.updateOne(query, update, this.withSession(mongoOptions))
 
             let upsertedIds: any[] | undefined
             if (res.upsertedId) {
@@ -214,7 +270,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
             mongoOptions.upsert = true
         }
 
-        const res = await this.collection.updateMany(query, update, mongoOptions)
+        const res = await this.collection.updateMany(query, update, this.withSession(mongoOptions))
 
         let upsertedIds!: any[]
         if (res.upsertedId) upsertedIds = await this.__mongodbIds_to_docIds([res.upsertedId])
@@ -254,8 +310,10 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
 
         let res: any
         try {
-            res = await this.collection.bulkWrite(operations, { ordered: false })
+            res = await this.collection.bulkWrite(operations, this.withSession({ ordered: false }))
         } catch (e: any) {
+            // 事务内不能吞掉写错误，否则 withTransaction 会误以为回调成功并提交部分写入。
+            if (this.session) throw e
             res = e.result
         }
 
@@ -288,7 +346,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
             mongoDocs = mongoDocsResult
         }
         try {
-            const res = await this.collection.insertMany(mongoDocs, { ordered: false })
+            const res = await this.collection.insertMany(mongoDocs, this.withSession({ ordered: false }))
             return {
                 insertedCount: res.insertedCount,
                 skippedCount: 0,
@@ -296,6 +354,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
                 skippedIds: [],
             }
         } catch (e: any) {
+            if (this.session) throw e
             const insertedCount = e.insertedCount ?? e.result?.nInserted ?? 0
             const writeErrors = e.writeErrors ?? e.result?.writeErrors ?? []
             const skippedIds = writeErrors.map((err: any) => err.op?.id).filter(Boolean)
@@ -385,8 +444,9 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
 
         let res: any
         try {
-            res = await this.collection.bulkWrite(operations, { ordered: false })
+            res = await this.collection.bulkWrite(operations, this.withSession({ ordered: false }))
         } catch (e: any) {
+            if (this.session) throw e
             res = e.result
         }
 
@@ -411,7 +471,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
     async deleteMany(filter: ITableFilter): Promise<ITableDeletedResult> {
         let query = jsToMongo(filter, true)
         if (query instanceof Promise) query = await query
-        const res = await this.collection.deleteMany(query)
+        const res = await this.collection.deleteMany(query, this.withSession())
         return { deletedCount: res.deletedCount }
     }
 
@@ -422,15 +482,15 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
 
         if (options?.sort) {
             // deleteOne 不直接支持 sort 选项，需要使用 findOneAndDelete
-            const res = await this.collection.findOneAndDelete(query, {
+            const res = await this.collection.findOneAndDelete(query, this.withSession({
                 sort: normalizeSort(options.sort),
                 projection: { id: 1, _id: 1 },
-            })
+            }))
 
             return { deletedCount: res?.id ? 1 : 0 }
         }
 
-        const res = await this.collection.deleteOne(query)
+        const res = await this.collection.deleteOne(query, this.withSession())
 
         return { deletedCount: res.deletedCount || 0 }
     }
@@ -438,7 +498,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
     /** 定义索引 */
     async defineIndexes(indexes: ITableIndexConfig[], options?: ITableDefineIndexesOptions): Promise<void> {
         if (options?.rebuild) {
-            await this.collection.dropIndexes()
+            await this.collection.dropIndexes(this.withSession())
         }
 
         const indexSpecs: any[] = []
@@ -513,7 +573,7 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
         if (dropSpecs.length > 0) {
             for (const name of dropSpecs) {
                 try {
-                    await this.collection.dropIndex(name)
+                    await this.collection.dropIndex(name, this.withSession())
                 } catch (e) {
                     /* ignore if not found */
                 }
@@ -522,23 +582,23 @@ export class MongoDBAdapterInstance implements ITableDBAdapterInstance {
 
         // 执行创建
         if (indexSpecs.length > 0) {
-            await this.collection.createIndexes(indexSpecs)
+            await this.collection.createIndexes(indexSpecs, this.withSession())
         }
     }
 
     /** 删除所有索引 */
     async dropIndexes(): Promise<void> {
-        await this.collection.dropIndexes()
+        await this.collection.dropIndexes(this.withSession())
     }
 
     /** 压缩数据库文件 */
     async compact(): Promise<void> {
-        await this.collection.db.command({ compact: this.collection.collectionName })
+        await this.collection.db.command({ compact: this.collection.collectionName }, this.withSession())
     }
 
     /** 内部方法：将 MongoDB 返回的 _id  转换为文档 id */
     async __mongodbIds_to_docIds(_ids: any[]) {
-        let re = await this.collection.find({ _id: { $in: _ids } }, { projection: { id: 1 } }).toArray()
+        let re = await this.collection.find({ _id: { $in: _ids } }, this.withSession({ projection: { id: 1 } })).toArray()
         return re.map((r) => r.id)
     }
 }

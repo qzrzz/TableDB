@@ -11,6 +11,7 @@ import { collectDescendantNodes } from "../util/collectDescendantNodes"
 import { collectExistingParentIds } from "../util/collectExistingParentIds"
 import { groupNodesByParentId } from "../util/groupNodesByParentId"
 import { repairTreeOverwriteConflicts } from "../util/repairTreeOverwriteConflicts"
+import { deleteNodes } from "./deleteNodes"
 
 /** 设置节点选项 */
 export type ITreeSetNodesOptions = ITreeOverwriteOptions & {
@@ -52,6 +53,9 @@ interface IApplySetOverwriteResult {
     mergedSourceNodeIds: string[]
 }
 
+/** 单次按 ID 查询的最大数量，避免大批量同步触发适配器参数上限。 */
+const SET_NODES_ID_BATCH_SIZE = 500
+
 /**
  * 设置节点
  *
@@ -83,7 +87,7 @@ export async function setNodes(
     const modif = Date.now()
     // presync 只用于把客户端旧版本状态带回给调用方，不影响本次写入是否继续执行。
     const presyncResult = await collectSetPresyncResult.call(this, nodes, options)
-    const writableNodes = prepareWritableNodes(nodes, modif)
+    const writableNodes = await prepareWritableNodes.call(this, nodes, modif)
     const visibleWritableNodes = await filterUpdateOnlyVisibleNodes.call(this, writableNodes, options)
     assertNoBatchDuplicateNodeConflicts(visibleWritableNodes)
 
@@ -111,7 +115,7 @@ export async function setNodes(
 
     if (overwriteResult.deletedNodeIds.length > 0) {
         // 覆盖策略确认要删除的目标节点，此时所有前置校验已通过，可以安全产生副作用。
-        await this.deleteNodes(overwriteResult.deletedNodeIds)
+        await deleteNodes.call(this, overwriteResult.deletedNodeIds)
     }
     await this.setMany(resolvedNodes, resolveSetManyOptions(options))
     await restoreWrittenNodesVisibility.call(this, resolvedNodes)
@@ -124,7 +128,7 @@ export async function setNodes(
     }
     if (overwriteResult.mergedSourceNodeIds.length > 0) {
         // merge 保留目标目录并迁移来源子树，写入完成后来源目录本身需要被删除。
-        await this.deleteNodes(overwriteResult.mergedSourceNodeIds)
+        await deleteNodes.call(this, overwriteResult.mergedSourceNodeIds)
     }
     await refreshTreeMetadata(this, {
         parentIds: [...Array.from(nodesByParentId.keys()), ...oldParentIds],
@@ -221,10 +225,39 @@ async function collectSetPresyncResult(
 }
 
 /** 将外部传入的节点补齐为可写入节点，并统一写入本次操作的 modif。 */
-function prepareWritableNodes(nodes: Partial<ITreeNode>[], modif: number): ITreeNode[] {
+async function prepareWritableNodes(
+    this: TableTree<ITreeNode>,
+    nodes: Partial<ITreeNode>[],
+    modif: number,
+): Promise<ITreeNode[]> {
+    // setNodes 接受 Partial 节点；已有节点缺失的结构字段必须从旧记录继承，不能套用创建节点的默认值。
+    const nodeIds = Array.from(new Set(nodes.map((node) => node.id).filter((id): id is string => typeof id === "string" && id.length > 0)))
+    const existingNodes: ITreeNode[] = []
+    for (let index = 0; index < nodeIds.length; index += SET_NODES_ID_BATCH_SIZE) {
+        const idBatch = nodeIds.slice(index, index + SET_NODES_ID_BATCH_SIZE)
+        const batchNodes = await this.findMany({ id: { $in: idBatch } }, { ignoreMarkDelete: true }) as ITreeNode[]
+        existingNodes.push(...batchNodes)
+    }
+    const existingNodeById = new Map(existingNodes.map((node) => [node.id, node]))
+
     return nodes.map((node) => {
         const { oldModif, oldCmodif, ...nodeData } = node as any
-        return normalizeWritableNode(nodeData, { modif }) as ITreeNode
+        const existingNode = typeof nodeData.id === "string" ? existingNodeById.get(nodeData.id) : undefined
+        const normalizedInput = { ...nodeData }
+
+        if (existingNode) {
+            if (normalizedInput.parentId === undefined) normalizedInput.parentId = existingNode.parentId
+            if (normalizedInput.name === undefined) normalizedInput.name = existingNode.name
+            if (normalizedInput.isDir === undefined) normalizedInput.isDir = existingNode.isDir
+            if (normalizedInput.size === undefined) normalizedInput.size = existingNode.size
+
+            // 跨父级更新时让索引逻辑重新分配位置；同父级更新则保留原排序。
+            if (normalizedInput.index === undefined && normalizedInput.parentId === existingNode.parentId) {
+                normalizedInput.index = existingNode.index
+            }
+        }
+
+        return normalizeWritableNode(normalizedInput, { modif }) as ITreeNode
     })
 }
 
@@ -391,6 +424,7 @@ async function applySetOverwrite(
     let pendingNodes = [...nodes]
     const processedMergeSourceIds = new Set<string>()
     const discardedBatchNodeIds = new Set<string>()
+    const existingReplaceSourceIds = new Set<string>()
 
     while (pendingNodes.length > 0) {
         const nodesByParentId = groupNodesByParentId(pendingNodes)
@@ -410,12 +444,20 @@ async function applySetOverwrite(
             }
             const resolved = await resolveOverwriteNodes(this, parentId, await hydrateMergeSourceNodes.call(this, parentNodes, options), options)
             collectDiscardedBatchNodeIds(parentNodes, resolved, discardedBatchNodeIds)
-            const targetSetResult = resolveTargetSetNodes(resolved)
+            for (const pair of resolved.replacePairs) {
+                if (pair.sourceNode.id === pair.targetNode.id) continue
+                const sourceNode = await this.get(pair.sourceNode.id, { ignoreMarkDelete: true })
+                if (sourceNode) {
+                    // 已存在的来源节点应保留自身 ID 并移动到目标位置，避免映射目标 ID 后源记录残留。
+                    existingReplaceSourceIds.add(pair.sourceNode.id)
+                }
+            }
+            const targetSetResult = resolveTargetSetNodes(resolved, existingReplaceSourceIds)
             replacePairsForCleanup.push(...resolved.replacePairs)
             deletedNodeIds.push(...targetSetResult.deleteNodeIds)
 
             for (const pair of resolved.replacePairs) {
-                if (pair.sourceNode.id !== pair.targetNode.id) {
+                if (pair.sourceNode.id !== pair.targetNode.id && !existingReplaceSourceIds.has(pair.sourceNode.id)) {
                     // replace 复用目标 ID 后，本批次来源目录的子节点也要跟着挂到目标 ID 下。
                     replacedSourceIdByTargetId.set(pair.sourceNode.id, pair.targetNode.id)
                 }
@@ -610,6 +652,7 @@ function resolveSetManyOptions(options?: ITreeSetNodesOptions) {
  */
 function resolveTargetSetNodes(
     resolved: IResolveOverwriteNodesResult<ITreeNode>,
+    existingReplaceSourceIds: Set<string>,
 ): { nodes: ITreeNode[]; deleteNodeIds: string[] } {
     if (resolved.replacePairs.length === 0) {
         return {
@@ -631,11 +674,22 @@ function resolveTargetSetNodes(
     for (const pairs of pairsBySourceId.values()) {
         const [firstPair, ...extraPairs] = pairs
         consumedSourceIds.add(firstPair.sourceNode.id)
+        if (existingReplaceSourceIds.has(firstPair.sourceNode.id)) {
+            // 来源节点已经存在时保留来源 ID，这样它原有的子树也会随节点一起移动。
+            deleteNodeIds.add(firstPair.targetNode.id)
+            for (const pair of extraPairs) deleteNodeIds.add(pair.targetNode.id)
+            nextNodes.push({
+                ...firstPair.sourceNode,
+                parentId: firstPair.targetNode.parentId,
+                index: firstPair.targetNode.index,
+                name: firstPair.targetNode.name,
+            })
+            continue
+        }
+
         deleteNodeIds.delete(firstPair.targetNode.id)
         // 一个来源节点命中多个目标冲突时，只复用第一个目标 ID，其余目标仍然需要删除。
-        for (const pair of extraPairs) {
-            deleteNodeIds.add(pair.targetNode.id)
-        }
+        for (const pair of extraPairs) deleteNodeIds.add(pair.targetNode.id)
         nextNodes.push(resolveConflictTargetUpdate(firstPair.sourceNode, firstPair.targetNode))
     }
 

@@ -24,6 +24,13 @@ import chalk from "chalk"
 export async function clearDeadNodes<TNode extends ITreeNode = ITreeNode>(
     table: TableTree<TNode>
 ): Promise<number> {
+    // 扫描期间必须阻塞同一实例的树写入，否则临时标记、删除和清理可能互相覆盖。
+    return table.runTreeTransaction(() => clearDeadNodesInternal(table))
+}
+
+async function clearDeadNodesInternal<TNode extends ITreeNode>(
+    table: TableTree<TNode>,
+): Promise<number> {
     const startTime = performance.now()
     const flagKey = "__checkIsNotDead"
     const flagValue = `dead_check_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -39,10 +46,7 @@ export async function clearDeadNodes<TNode extends ITreeNode = ITreeNode>(
         console.log(chalk.yellow(`[ClearDeadNodes] 未在根路径 "/" 下找到任何有效节点。`))
     } else {
         // 给根节点打上标记
-        await table.adapter.updateMany(
-            { id: { $in: rootIds } },
-            { $set: { [flagKey]: flagValue } }
-        )
+        await updateIdsInBatches(table, rootIds, { $set: { [flagKey]: flagValue } })
     }
 
     // 2. BFS 队列遍历所有可达节点
@@ -64,10 +68,7 @@ export async function clearDeadNodes<TNode extends ITreeNode = ITreeNode>(
 
         if (unvisitedIds.length > 0) {
             // 给子节点打标记
-            await table.adapter.updateMany(
-                { id: { $in: unvisitedIds } },
-                { $set: { [flagKey]: flagValue } }
-            )
+            await updateIdsInBatches(table, unvisitedIds, { $set: { [flagKey]: flagValue } })
 
             // 放入队列和访问集合
             for (const id of unvisitedIds) {
@@ -110,4 +111,15 @@ export async function clearDeadNodes<TNode extends ITreeNode = ITreeNode>(
     console.log(chalk.blue.bold(`[ClearDeadNodes] 扫描清理流程结束，共耗时 ${duration}ms。\n`))
 
     return deadCount
+}
+
+/** 将按 ID 的批量更新拆分，避免大树触发 SQL/驱动的参数数量上限。 */
+async function updateIdsInBatches<TNode extends ITreeNode>(
+    table: TableTree<TNode>,
+    ids: string[],
+    updateOp: any,
+): Promise<void> {
+    for (let index = 0; index < ids.length; index += 500) {
+        await table.adapter.updateMany({ id: { $in: ids.slice(index, index + 500) } }, updateOp)
+    }
 }

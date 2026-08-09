@@ -13,8 +13,32 @@ export type ITableDBAdapter = {
   useAdapterInstance(tableName: string): Promise<ITableDBAdapterInstance>;
 };
 
+/**
+ * 数据库事务选项。
+ * 具体适配器可以识别自己支持的字段；通用层只要求事务回调拿到一个
+ * 与当前事务绑定的 adapter 实例，避免业务代码误用事务外的连接。
+ */
+export interface ITableTransactionOptions {
+  /** 事务提交的最大等待时间（MongoDB 等适配器支持）。 */
+  maxCommitTimeMS?: number;
+  /** 读取隔离级别，由具体适配器解释。 */
+  readConcern?: unknown;
+  /** 写入确认级别，由具体适配器解释。 */
+  writeConcern?: unknown;
+}
+
 export interface ITableDBAdapterInstance {
   name: string;
+
+  /**
+   * 在一个数据库事务中执行一组操作。
+   * 回调参数是事务绑定实例，业务代码必须使用该实例执行事务内读写。
+   */
+  runTransaction?<T>(
+    callback: (transaction: ITableDBAdapterInstance) => Promise<T>,
+    options?: ITableTransactionOptions,
+  ): Promise<T>;
+
   // KV 基础操作
   get(id: any): Promise<ITableDoc | void>;
   set(id: any, value: Partial<ITableDoc>): Promise<void>;

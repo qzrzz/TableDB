@@ -2,6 +2,8 @@ import type { TableTree } from "../TableTree"
 import type { ITreeNode, ITreeOverwriteOptions } from "../tree.types"
 import { getNodeValueByPath } from "./getNodeValueByPath"
 import { isTreeUniqueValueEqual } from "./isTreeUniqueValueEqual"
+import { deleteNodes } from "../core/deleteNodes"
+import { moveNodes } from "../core/moveNodes"
 
 /** 多用户并发覆盖时可能同时写入同一唯一键，这里兜底只保留同一父级下最新的冲突节点。 */
 export async function repairDuplicatedSiblingConflicts<TNode extends ITreeNode>(
@@ -52,7 +54,8 @@ export async function repairDuplicatedSiblingConflicts<TNode extends ITreeNode>(
     }
 
     if (deleteNodeIds.length > 0) {
-        await table.deleteNodes(deleteNodeIds)
+        // 该修复可能在 set/move 的外层事务中执行，调用核心函数避免再次进入队列。
+        await deleteNodes.call(table, deleteNodeIds)
     }
 }
 
@@ -71,7 +74,7 @@ async function mergeDuplicatedDirChildren<TNode extends ITreeNode>(
     const children = await table.findMany({ parentId: sourceNode.id }, { sort: { index: 1 } }) as TNode[]
     if (children.length === 0) return
 
-    await table.moveNodes(children.map((child) => child.id), targetNode.id, {
+    await moveNodes.call(table, children.map((child) => child.id), targetNode.id, {
         uniqueBy,
         overwriteMode,
         index: { toEnd: true },
