@@ -190,6 +190,9 @@ export async function listPagingByCursor<T>(
         findOptions.projection = { ...options.projection }
         if (sortKey === "_id") {
             findOptions.projection._id = 1
+            // 默认游标依赖内部 _id，但调用方没有投影时仍需要返回完整文档。
+            // SQLiteAdapter 使用该内部标记区分游标取值和用户显式的“仅 _id”投影。
+            if (!options.projection) findOptions.__cursorNeedsFullDocument = true
         }
     }
 

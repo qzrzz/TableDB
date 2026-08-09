@@ -7,6 +7,23 @@ export interface CompatibilityResult {
     reasons: Array<{ path: string; reason: string; value?: any }>
 }
 
+/** 脏字段统计中使用的值类型位标记。 */
+export const SQLITE_VALUE_TYPE = {
+    ARRAY: 1,
+    STRING: 2,
+    NUMBER: 4,
+    BOOLEAN: 8,
+    DATE: 16,
+    SPECIAL: 32,
+    OTHER: 64,
+} as const
+
+export type QuerySchemaStats = {
+    hasArray: boolean
+    hasSpecial: boolean
+    typeMask?: number
+}
+
 /**
  * 判断值是否可以直接在 SQL 中安全比较
  * 
@@ -57,7 +74,7 @@ export function isCompatibleValue(val: any): boolean {
  */
 export function analyzeQueryCompatibility(
     filter: ITableFilter,
-    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean }>
+    schemaStats?: Map<string, QuerySchemaStats>
 ): CompatibilityResult {
     const reasons: Array<{ path: string; reason: string; value?: any }> = []
     if (!filter) return { compatible: true, reasons }
@@ -139,21 +156,60 @@ export function analyzeQueryCompatibility(
 
                     if (isOperator) {
                         for (const op in val) {
+                            // id/_id 是数据库中的固定标量列，不依赖 JSON 字段统计信息。
+                            if (path === "id" || path === "_id") {
+                                const opValue = val[op]
+                                const valid =
+                                    ["$gt", "$gte", "$lt", "$lte", "$eq", "$ne"].includes(op)
+                                        ? isCompatibleValue(opValue)
+                                        : ["$in", "$nin"].includes(op) &&
+                                          Array.isArray(opValue) &&
+                                          opValue.every(isCompatibleValue)
+                                if (!valid) {
+                                    reasons.push({ path, reason: `ID operator ${op} is not SQL-compatible`, value: opValue })
+                                    isCompatible = false
+                                }
+                                continue
+                            }
+
                             if (["$gt", "$gte", "$lt", "$lte"].includes(op)) {
                                 if (!isCompatibleValue(val[op])) {
                                     reasons.push({ path, reason: `Value type unsafe for SQL comparison in ${op}`, value: val[op] })
                                     isCompatible = false
-                                } else if (!stats || !stats.hasSpecial) {
-                                    // 字段也是安全的，值也是安全的 -> SQL Compatible
-                                    continue
                                 } else {
-                                    // 字段包含特殊值 (NaN, null)，SQL 比较行为可能不一致
-                                    reasons.push({ path, reason: `Range operator ${op} unsafe due to potential special numeric values`, value: val[op] })
-                                    isCompatible = false
+                                    const expectedType = getRangeTypeMask(val[op])
+                                    if (
+                                        !stats ||
+                                        stats.hasArray ||
+                                        stats.hasSpecial ||
+                                        expectedType === undefined ||
+                                        stats.typeMask !== expectedType
+                                    ) {
+                                        // 只有字段类型已知且完全单一时，范围 SQL 才能保证不把数组或其他类型混入比较。
+                                        reasons.push({ path, reason: `Range operator ${op} requires a homogeneous scalar field`, value: val[op] })
+                                        isCompatible = false
+                                    }
                                 }
-                            } else if (["$eq", "$in"].includes(op)) {
+                            } else if (op === "$eq") {
                                 if (!isCompatibleValue(val[op])) {
                                     reasons.push({ path, reason: `Value type unsafe for SQL equality in ${op}`, value: val[op] })
+                                    isCompatible = false
+                                }
+                            } else if (op === "$in") {
+                                if (!Array.isArray(val[op]) || !val[op].every(isCompatibleValue)) {
+                                    reasons.push({ path, reason: "$in values must be SQL-compatible scalar values", value: val[op] })
+                                    isCompatible = false
+                                }
+                            } else if (op === "$ne" || op === "$nin") {
+                                const values = op === "$nin" ? val[op] : [val[op]]
+                                if (
+                                    !values.every(isCompatibleValue) ||
+                                    !stats ||
+                                    stats.hasArray ||
+                                    stats.hasSpecial ||
+                                    (stats.typeMask !== undefined && (stats.typeMask & (stats.typeMask - 1)) !== 0)
+                                ) {
+                                    reasons.push({ path, reason: `${op} requires a known homogeneous scalar field`, value: val[op] })
                                     isCompatible = false
                                 }
                             } else {
@@ -216,7 +272,14 @@ export function analyzeQueryCompatibility(
  */
 export function isQuerySqlCompatible(
     filter: ITableFilter,
-    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean }>
+    schemaStats?: Map<string, QuerySchemaStats>
 ): boolean {
     return analyzeQueryCompatibility(filter, schemaStats).compatible
+}
+
+function getRangeTypeMask(value: any): number | undefined {
+    if (typeof value === "number" && Number.isFinite(value)) return SQLITE_VALUE_TYPE.NUMBER
+    if (typeof value === "string") return SQLITE_VALUE_TYPE.STRING
+    if (typeof value === "boolean") return SQLITE_VALUE_TYPE.BOOLEAN
+    return undefined
 }

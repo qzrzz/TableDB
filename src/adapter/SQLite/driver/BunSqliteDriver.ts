@@ -113,6 +113,10 @@ export class BunSqliteDriver implements ISqliteDatabase {
         // bun:sqlite 使用 query() 而不是 prepare()
         let cached = this.stmtCache.get(sql)
         if (!cached) {
+            if (this.stmtCache.size >= 512) {
+                const oldest = this.stmtCache.keys().next().value
+                if (oldest) this.stmtCache.delete(oldest)
+            }
             cached = new BunSqliteStatementWrapper(this.db.query(sql))
             this.stmtCache.set(sql, cached)
         }

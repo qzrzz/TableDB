@@ -1,5 +1,6 @@
 import { join } from "path"
 import { tmpdir } from "os"
+import { rm } from "fs/promises"
 import { SQLiteAdapter } from "../../../adapter/SQLite"
 import { TableTree, defineTableTree } from "../TableTree"
 import type { ITreeNode } from "../tree.types"
@@ -14,10 +15,13 @@ interface ITestTreeNode extends ITreeNode {
 }
 
 let tableIndex = 0
+const openedTables: TableTree<ITestTreeNode>[] = []
+const temporaryDatabaseFiles = new Set<string>()
 
 async function createMultiUserTables(name: string, userCount = 3) {
     const tableName = `test-tree-multi-user-comb-${tableIndex++}-${name}`
     const filename = join(tmpdir(), `${tableName}-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
+    temporaryDatabaseFiles.add(filename)
     const useTreeTable = defineTableTree<ITestTreeNode>({
         name: tableName,
         enableMarkDelete: true,
@@ -25,13 +29,15 @@ async function createMultiUserTables(name: string, userCount = 3) {
 
     return await Promise.all(
         Array.from({ length: userCount }, async () => {
-            return await useTreeTable({
+            const table = await useTreeTable({
                 adapter: SQLiteAdapter({
                     filename,
                     driver: "better-sqlite3",
                     multi: true,
                 }),
             })
+            openedTables.push(table)
+            return table
         }),
     )
 }
@@ -172,7 +178,22 @@ async function expectNoParentCycles(table: TableTree<ITestTreeNode>) {
 }
 
 describe("TableTree 多用户连续操作组合", () => {
-    vi.setConfig({ testTimeout: 120000 })
+    // 锁竞争应通过异步退避快速收敛；较短超时可以及时暴露事件循环阻塞回归。
+    vi.setConfig({ testTimeout: 15000 })
+
+    afterEach(async () => {
+        const tables = openedTables.splice(0)
+        await Promise.allSettled(tables.map((table) => table.close()))
+
+        // 关闭全部连接后清理主库和 WAL 辅助文件，避免长测试套件持续占用临时资源。
+        const filenames = [...temporaryDatabaseFiles]
+        temporaryDatabaseFiles.clear()
+        await Promise.all(
+            filenames.flatMap((filename) =>
+                [filename, `${filename}-wal`, `${filename}-shm`].map((path) => rm(path, { force: true })),
+            ),
+        )
+    })
     test("多个用户实例连接同一目录树时应看到一致的操作结果和 metadata", async () => {
         const [alice, bob, chen] = await createMultiUserTables("shared-visibility")
         await seedSharedWorkspace(alice)

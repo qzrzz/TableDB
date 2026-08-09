@@ -259,6 +259,17 @@ function compareOp(op: string, a: any, b: any): boolean {
     // MongoDB 行为：null 和 undefined 不参与比较，返回 false
     if (a === null || a === undefined) return false
     if (b === null || b === undefined) return false
+
+    // 范围比较不应触发 JavaScript 的隐式类型转换；字符串、数字和布尔值只与同类型比较。
+    if (a instanceof Date || b instanceof Date) {
+        if (!(a instanceof Date) || !(b instanceof Date)) return false
+    } else if (typeof a !== typeof b) {
+        return false
+    } else if (!["number", "string", "boolean", "bigint"].includes(typeof a)) {
+        return false
+    }
+    // Infinity 仍参与同类型数值排序；只有 NaN 不具备可比较的顺序。
+    if (typeof a === "number" && (Number.isNaN(a) || Number.isNaN(b))) return false
     
     const res = compare(a, b)
     if (op === "$gt") return res > 0

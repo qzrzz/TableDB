@@ -1,6 +1,7 @@
 import { ITableFilter } from "../../../core/types"
 import { ITableFindOptions } from "../../adapter"
 import { serialize } from "./serializer"
+import { getSideTableName, quoteIdentifier, quoteSqlString, sqliteJsonPath } from "./sqlIdentifiers"
 
 /**
  * 确保 _id 值为整数类型
@@ -14,8 +15,7 @@ function ensureIntegerId(value: any): any {
 
     // 字符串形式的整数
     if (typeof value === "string") {
-        const num = parseInt(value, 10)
-        if (!isNaN(num)) return num
+        if (/^\d+$/.test(value)) return Number(value)
         return value // 无法转换则原样返回
     }
 
@@ -54,7 +54,7 @@ export interface ISqlQuery {
 export async function mongoToSql(
     filter: ITableFilter,
     options?: ITableFindOptions,
-    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean }>
+    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean; typeMask?: number }>
 ): Promise<ISqlQuery> {
     const conditions: string[] = []
     const params: any[] = []
@@ -76,8 +76,14 @@ export async function mongoToSql(
     let offset: number | undefined
 
     if (options) {
-        if (options.limit !== undefined) limit = options.limit
-        if (options.offset !== undefined) offset = options.offset
+        if (options.limit !== undefined) {
+            if (!Number.isInteger(options.limit) || options.limit < 0) throw new Error("limit 必须是非负整数")
+            limit = options.limit
+        }
+        if (options.offset !== undefined) {
+            if (!Number.isInteger(options.offset) || options.offset < 0) throw new Error("offset 必须是非负整数")
+            offset = options.offset
+        }
 
         if (options.sort) {
             const sortParts: string[] = []
@@ -89,7 +95,7 @@ export async function mongoToSql(
                 } else if (key === "_id") {
                     sortParts.push(`_id ${dir === 1 ? "ASC" : "DESC"}`)
                 } else {
-                    sortParts.push(`json_extract(data, '$.${key}') ${dir === 1 ? "ASC" : "DESC"}`)
+                    sortParts.push(`json_extract(data, ${quoteSqlString(sqliteJsonPath(key))}) ${dir === 1 ? "ASC" : "DESC"}`)
                 }
             }
             if (sortParts.length > 0) sort = sortParts.join(", ")
@@ -113,7 +119,7 @@ async function parseFilterNode(
     params: any[],
     indexedFields?: Set<string>,
     tableName?: string,
-    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean }>
+    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean; typeMask?: number }>
 ) {
     for (const key in node) {
         if (key === "$and") {
@@ -195,14 +201,8 @@ async function parseFieldCondition(
     } else {
         // 将点号路径转换为 SQLite JSON 路径格式
         // 例如 "tags.2" -> "$.tags[2]", "items.0.name" -> "$.items[0].name"
-        const jsonPath = pathParts
-            .map((part, idx) => {
-                if (idx === 0) return `$.${part}`
-                if (/^\d+$/.test(part)) return `[${part}]`
-                return `.${part}`
-            })
-            .join("")
-        colExpr = `json_extract(data, '${jsonPath}')`
+        const jsonPath = sqliteJsonPath(path)
+        colExpr = `json_extract(data, ${quoteSqlString(jsonPath)})`
     }
 
     if (!isOperatorObject(value)) {
@@ -219,14 +219,8 @@ async function parseFieldCondition(
                 conditions.push(`${colExpr} IS NULL`)
             } else {
                 // 将点号路径转换为 JSON 路径
-                const pathParts = path.split(".")
-                const jsonPath = pathParts
-                    .map((part, idx) => {
-                        if (idx === 0) return `$.${part}`
-                        if (/^\d+$/.test(part)) return `[${part}]`
-                        return `.${part}`
-                    })
-                    .join("")
+                const jsonPath = sqliteJsonPath(path)
+                const jsonPathSql = quoteSqlString(jsonPath)
 
                 // 利用 schemaStats 判断该字段是否曾存储过数组
                 // 如果没有，可以跳过数组检查，生成更简单的 SQL
@@ -236,18 +230,18 @@ async function parseFieldCondition(
                 if (hasArrayType) {
                     // 字段可能是数组，需要检查数组包含 null 的情况
                     const nullCondition = `(
-                        json_type(data, '${jsonPath}') IS NULL
-                        OR json_type(data, '${jsonPath}') = 'null'
-                        OR (json_type(data, '${jsonPath}') = 'array' AND EXISTS (
-                            SELECT 1 FROM json_each(data, '${jsonPath}') WHERE value IS NULL
+                        json_type(data, ${jsonPathSql}) IS NULL
+                        OR json_type(data, ${jsonPathSql}) = 'null'
+                        OR (json_type(data, ${jsonPathSql}) = 'array' AND EXISTS (
+                            SELECT 1 FROM json_each(data, ${jsonPathSql}) WHERE value IS NULL
                         ))
                     )`
                     conditions.push(nullCondition)
                 } else {
                     // 字段从未存储过数组，可以使用更简单的 SQL
                     const nullCondition = `(
-                        json_type(data, '${jsonPath}') IS NULL
-                        OR json_type(data, '${jsonPath}') = 'null'
+                        json_type(data, ${jsonPathSql}) IS NULL
+                        OR json_type(data, ${jsonPathSql}) = 'null'
                     )`
                     conditions.push(nullCondition)
                 }
@@ -293,6 +287,8 @@ async function parseFieldCondition(
                             break
                         }
                     }
+                    // 兼容性分析器会把没有数组记录的字段判定为纯 SQL 可用；
+                    // 即使字段从未出现，也必须生成真实的 JSON 等值条件，不能退化为 1=1。
                     if (safe) isCleanScalar = true
                 }
 
@@ -319,14 +315,8 @@ async function parseFieldCondition(
                     // MongoDB 行为：$eq null 匹配 null、缺失字段和数组包含 null
                     if (opVal === null || opVal === undefined) {
                         // 将点号路径转换为 JSON 路径
-                        const pathParts = path.split(".")
-                        const jsonPath = pathParts
-                            .map((part, idx) => {
-                                if (idx === 0) return `$.${part}`
-                                if (/^\d+$/.test(part)) return `[${part}]`
-                                return `.${part}`
-                            })
-                            .join("")
+                        const jsonPath = sqliteJsonPath(path)
+                        const jsonPathSql = quoteSqlString(jsonPath)
 
                         // 利用 schemaStats 判断该字段是否曾存储过数组
                         const stats = schemaStats?.get(path)
@@ -335,18 +325,18 @@ async function parseFieldCondition(
                         if (hasArrayType) {
                             // 字段可能是数组，需要检查数组包含 null 的情况
                             const nullCondition = `(
-                                json_type(data, '${jsonPath}') IS NULL
-                                OR json_type(data, '${jsonPath}') = 'null'
-                                OR (json_type(data, '${jsonPath}') = 'array' AND EXISTS (
-                                    SELECT 1 FROM json_each(data, '${jsonPath}') WHERE value IS NULL
+                                json_type(data, ${jsonPathSql}) IS NULL
+                                OR json_type(data, ${jsonPathSql}) = 'null'
+                                OR (json_type(data, ${jsonPathSql}) = 'array' AND EXISTS (
+                                    SELECT 1 FROM json_each(data, ${jsonPathSql}) WHERE value IS NULL
                                 ))
                             )`
                             conditions.push(nullCondition)
                         } else {
                             // 字段从未存储过数组，使用更简单的 SQL
                             const nullCondition = `(
-                                json_type(data, '${jsonPath}') IS NULL
-                                OR json_type(data, '${jsonPath}') = 'null'
+                                json_type(data, ${jsonPathSql}) IS NULL
+                                OR json_type(data, ${jsonPathSql}) = 'null'
                             )`
                             conditions.push(nullCondition)
                         }
@@ -366,26 +356,46 @@ async function parseFieldCondition(
                     }
                     break
                 case "$gt":
-                    if (isSafeForRange(opVal))
+                    if (isSafeForRange(opVal) && isRangeSqlSafe(path, opVal, schemaStats))
                         await addCondition(colExpr, ">", opVal, conditions, params, indexedFields, tableName)
+                    else conditions.push("1=1")
                     break
                 case "$gte":
-                    if (isSafeForRange(opVal))
+                    if (isSafeForRange(opVal) && isRangeSqlSafe(path, opVal, schemaStats))
                         await addCondition(colExpr, ">=", opVal, conditions, params, indexedFields, tableName)
+                    else conditions.push("1=1")
                     break
                 case "$lt":
-                    if (isSafeForRange(opVal))
+                    if (isSafeForRange(opVal) && isRangeSqlSafe(path, opVal, schemaStats))
                         await addCondition(colExpr, "<", opVal, conditions, params, indexedFields, tableName)
+                    else conditions.push("1=1")
                     break
                 case "$lte":
-                    if (isSafeForRange(opVal))
+                    if (isSafeForRange(opVal) && isRangeSqlSafe(path, opVal, schemaStats))
                         await addCondition(colExpr, "<=", opVal, conditions, params, indexedFields, tableName)
+                    else conditions.push("1=1")
                     break
                 case "$in":
                     if (Array.isArray(opVal) && opVal.length > 0) {
                         // 检查是否包含 null
                         const hasNull = opVal.some((v) => v === null || v === undefined)
                         const nonNullValues = opVal.filter((v) => v !== null && v !== undefined)
+
+                        // id 和 _id 存储在真实列中，不应检查 data JSON 中并不存在的同名字段。
+                        if (path === "id" || path === "_id") {
+                            if (nonNullValues.length === 0) {
+                                conditions.push("1=0")
+                                break
+                            }
+                            const marks = nonNullValues.map(() => "?").join(",")
+                            conditions.push(`${colExpr} IN (${marks})`)
+                            for (let v of nonNullValues) {
+                                if (path === "id" && typeof v === "number") v = String(v)
+                                const [sVal] = await prepareValue(v)
+                                params.push(sVal)
+                            }
+                            break
+                        }
 
                         // 必须所有非 null 元素都支持安全相等性检查才能使用 SQL IN
                         if (nonNullValues.every(isSafeForEquality)) {
@@ -399,6 +409,8 @@ async function parseFieldCondition(
                             // 处理非 null 值
                             if (nonNullValues.length > 0) {
                                 const marks = nonNullValues.map(() => "?").join(",")
+                                const sqlTypes = getSqliteTypesForValues(nonNullValues)
+                                const typeSql = `json_type(data, ${quoteSqlString(sqliteJsonPath(path))}) IN (${sqlTypes.map(quoteSqlString).join(", ")})`
 
                                 // 智能优化：倒排索引 (Side Table) 检查
                                 let optimized = false
@@ -408,10 +420,9 @@ async function parseFieldCondition(
                                         const path = match[1]
                                         const fieldName = path.replace(/^\$\./, "")
                                         if (indexedFields.has(fieldName)) {
-                                            const safeField = fieldName.replace(/[^a-zA-Z0-9_]/g, "_")
-                                            const sideTableName = `_idx_${tableName}_${safeField}`
+                                            const sideTableName = getSideTableName(tableName!, fieldName)
                                             inConditions.push(
-                                                `EXISTS (SELECT 1 FROM "${sideTableName}" WHERE id = "${tableName}".id AND val IN (${marks}))`
+                                                `EXISTS (SELECT 1 FROM ${quoteIdentifier(sideTableName)} WHERE id = ${quoteIdentifier(tableName!)}.id AND val IN (${marks})) AND (json_type(data, ${quoteSqlString(path)}) = 'array' OR ${typeSql})`
                                             )
                                             optimized = true
                                         }
@@ -426,16 +437,10 @@ async function parseFieldCondition(
                                     // 注意：必须先用两参数形式的 json_type(data, path) 判断字段确实是数组，
                                     // 再调用 json_each。否则当字段是标量字符串时（如 name="src"），
                                     // json_each(json_extract(...)) 会把 "src" 当作 JSON 解析而抛出 "malformed JSON"。
-                                    const pathParts = path.split(".")
-                                    const jsonPath = pathParts
-                                        .map((part, idx) => {
-                                            if (idx === 0) return `$.${part}`
-                                            if (/^\d+$/.test(part)) return `[${part}]`
-                                            return `.${part}`
-                                        })
-                                        .join("")
+                                    const jsonPath = sqliteJsonPath(path)
+                                    const jsonPathSql = quoteSqlString(jsonPath)
                                     inConditions.push(
-                                        `(${colExpr} IN (${marks}) OR (json_type(data, '${jsonPath}') = 'array' AND EXISTS (SELECT 1 FROM json_each(data, '${jsonPath}') WHERE value IN (${marks}))))`
+                                        `((${colExpr} IN (${marks}) AND ${typeSql}) OR (json_type(data, ${jsonPathSql}) = 'array' AND EXISTS (SELECT 1 FROM json_each(data, ${jsonPathSql}) WHERE type IN (${sqlTypes.map(quoteSqlString).join(", ")} ) AND value IN (${marks}))))`
                                     )
                                 }
 
@@ -487,7 +492,11 @@ async function parseFieldCondition(
                             // 处理非 null 值
                             if (nonNullValues.length > 0) {
                                 const marks = nonNullValues.map(() => "?").join(",")
-                                ninConditions.push(`${colExpr} NOT IN (${marks})`)
+                                ninConditions.push(
+                                    hasNull
+                                        ? `${colExpr} NOT IN (${marks})`
+                                        : `(${colExpr} NOT IN (${marks}) OR ${colExpr} IS NULL)`,
+                                )
                                 for (let v of nonNullValues) {
                                     if (colExpr === "id" && typeof v === "number") v = String(v)
                                     const [sVal] = await prepareValue(v)
@@ -549,15 +558,16 @@ async function addCondition(
                 // 生成类型检查条件
                 // 注意：NaN 和 Infinity 虽然 typeof 是 "number"，但序列化后是对象 { $t: "nan" } 等
                 let typeCheck: string
+                const pathSql = quoteSqlString(path.replace(/''/g, "'"))
                 if (typeof val === "boolean") {
-                    typeCheck = `json_type(data, '${path}') = '${val ? "true" : "false"}'`
+                    typeCheck = `json_type(data, ${pathSql}) = '${val ? "true" : "false"}'`
                 } else if (typeof val === "number") {
                     if (Number.isNaN(val) || !Number.isFinite(val)) {
                         // NaN/Infinity 序列化为对象 { $t: "nan" } 等
-                        typeCheck = `json_type(data, '${path}') = 'object'`
+                        typeCheck = `json_type(data, ${pathSql}) = 'object'`
                     } else {
                         // 普通数值
-                        typeCheck = `json_type(data, '${path}') IN ('integer', 'real')`
+                        typeCheck = `json_type(data, ${pathSql}) IN ('integer', 'real')`
                     }
                 } else {
                     typeCheck = "1=1"
@@ -569,11 +579,11 @@ async function addCondition(
                 const isIndexed = indexedFields?.has(fieldName) && tableName
 
                 if (isIndexed) {
-                    const safeField = fieldName.replace(/[^a-zA-Z0-9_]/g, "_")
-                    const sideTableName = `_idx_${tableName}_${safeField}`
+                    const sideTableName = getSideTableName(tableName!, fieldName)
 
                     // EXISTS (SELECT 1 FROM "_idx_table_tags" WHERE id = "table".id AND val = ?)
-                    subQuery = `EXISTS (SELECT 1 FROM "${sideTableName}" WHERE id = "${tableName}".id AND val = ?)`
+                    // 侧表保存的是数组元素；标量混合时用字段类型约束，数组字段则由侧表精确命中元素。
+                    subQuery = `EXISTS (SELECT 1 FROM ${quoteIdentifier(sideTableName)} WHERE id = ${quoteIdentifier(tableName!)}.id AND val = ?) AND (json_type(data, ${pathSql}) = 'array' OR (${typeCheck}))`
                     conditions.push(subQuery)
                     params.push(sVal)
                 } else {
@@ -587,7 +597,7 @@ async function addCondition(
                         subQuery = `(${col} = ? AND ${typeCheck})`
                         params.push(sVal)
                     } else {
-                        subQuery = `((${col} = ? AND ${typeCheck}) OR (json_type(data, '${path}') = 'array' AND EXISTS (SELECT 1 FROM json_each(data, '${path}') WHERE value = ?)))`
+                        subQuery = `((${col} = ? AND ${typeCheck}) OR (json_type(data, ${pathSql}) = 'array' AND EXISTS (SELECT 1 FROM json_each(data, ${pathSql}) WHERE value = ?)))`
                         params.push(sVal)
                         // 仅为数组检查分支再次 push sVal
                         if (!(val instanceof Map) && !(val instanceof Set)) {
@@ -598,6 +608,25 @@ async function addCondition(
                 }
                 return
             }
+        }
+    }
+
+    // 范围比较必须约束 JSON 原始类型，防止 SQLite 将字符串隐式转换成数字。
+    if ([">", ">=", "<", "<="].includes(op) && col.startsWith("json_extract(data,")) {
+        const match = col.match(/^json_extract\(data, '((?:''|[^'])+)'\)$/)
+        if (match) {
+            const jsonPath = match[1].replace(/''/g, "'")
+            const typeCheck =
+                typeof val === "number"
+                    ? `json_type(data, ${quoteSqlString(jsonPath)}) IN ('integer', 'real')`
+                    : typeof val === "string"
+                      ? `json_type(data, ${quoteSqlString(jsonPath)}) = 'text'`
+                      : typeof val === "boolean"
+                        ? `json_type(data, ${quoteSqlString(jsonPath)}) IN ('true', 'false')`
+                        : "0"
+            conditions.push(`(${typeCheck} AND ${col} ${op} ?)`)
+            params.push(sVal)
+            return
         }
     }
 
@@ -623,6 +652,42 @@ function isSafeForRange(val: any): boolean {
     if (t === "string" || t === "boolean") return true
     if (val instanceof Date) return true
     return false
+}
+
+function getSqliteTypesForValues(values: any[]): string[] {
+    const types = new Set<string>()
+    for (const value of values) {
+        if (typeof value === "number") {
+            types.add("integer")
+            types.add("real")
+        } else if (typeof value === "string") {
+            types.add("text")
+        } else if (typeof value === "boolean") {
+            types.add(value ? "true" : "false")
+        } else if (value instanceof Date) {
+            types.add("object")
+        }
+    }
+    return [...types]
+}
+
+function isRangeSqlSafe(
+    path: string,
+    value: any,
+    schemaStats?: Map<string, { hasArray: boolean; hasSpecial: boolean; typeMask?: number }>,
+): boolean {
+    if (path === "id" || path === "_id") return isSafeForRange(value)
+    const stats = schemaStats?.get(path)
+    if (!stats || stats.hasArray || stats.hasSpecial) return false
+    const expected =
+        typeof value === "number"
+            ? 4
+            : typeof value === "string"
+              ? 2
+              : typeof value === "boolean"
+                ? 8
+                : undefined
+    return expected !== undefined && stats.typeMask === expected
 }
 
 function isSafeForEquality(val: any): boolean {

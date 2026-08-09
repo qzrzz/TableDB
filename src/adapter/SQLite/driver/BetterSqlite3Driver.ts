@@ -77,6 +77,10 @@ export class BetterSqlite3Driver implements ISqliteDatabase {
         // 使用缓存提高性能
         let cached = this.stmtCache.get(sql)
         if (!cached) {
+            if (this.stmtCache.size >= 512) {
+                const oldest = this.stmtCache.keys().next().value
+                if (oldest) this.stmtCache.delete(oldest)
+            }
             cached = new BetterSqlite3Statement(this.db.prepare(sql))
             this.stmtCache.set(sql, cached)
         }

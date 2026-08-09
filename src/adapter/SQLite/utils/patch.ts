@@ -13,8 +13,10 @@ export function applyUpdate(doc: any, op: ITableUpdateOp): boolean {
     // $set
     if (op.$set) {
         for (const [path, value] of Object.entries(op.$set)) {
-            set(doc, path, value)
-            modified = true
+            if (!isEqual(get(doc, path), value)) {
+                set(doc, path, value)
+                modified = true
+            }
         }
     }
 
@@ -22,8 +24,10 @@ export function applyUpdate(doc: any, op: ITableUpdateOp): boolean {
     if (op.$unset) {
         const paths = Array.isArray(op.$unset) ? op.$unset : Object.keys(op.$unset)
         for (const path of paths) {
-            unset(doc, path)
-            modified = true
+            if (has(doc, path)) {
+                unset(doc, path)
+                modified = true
+            }
         }
     }
 
@@ -118,6 +122,7 @@ export function applyUpdate(doc: any, op: ITableUpdateOp): boolean {
                     const position = addOp.$position
                     const slice = addOp.$slice
 
+                    if (each.length === 0) continue
                     if (typeof position === 'number') {
                         arr.splice(position, 0, ...each)
                     } else {
