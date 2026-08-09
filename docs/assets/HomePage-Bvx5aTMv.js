@@ -1,1 +1,0 @@
-import{l as e,n as t,o as n,u as r}from"./index-DQE0ypXo.js";var i=e({name:`HomePage`}),a={class:`Starmap-HomePage`};function o(e,t,i,o,s,c){return r(),n(`div`,a)}var s=t(i,[[`render`,o]]);export{s as default};

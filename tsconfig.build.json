@@ -3,6 +3,7 @@
     "exclude": [
         "src/extension/treeOld/**/*",
         "src/test/**/*",
-        "src/**/*.test.ts"
+        "src/**/*.test.ts",
+        "src/**/test/**/*"
     ]
 }
